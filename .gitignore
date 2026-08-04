@@ -1,0 +1,38 @@
+# Environments
+.env
+_env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+myenv/
+/myenv
+
+
+# Byte-compiled / optimized / DLL files
+
+__pycache__/
+__pycache____/
+
+
+
+# Log files
+logs/
+*.log
+*.log.gz
+
+
+.DS_Store
+/auth_data.db.db
+access_token.json
+access_token.txt
+FYERS/fyers_live_1s_*.csv
+FYERS/fyers_live_ticks_*.csv
+NUBRA/nubra_*.csv
+NUBRA/*.parquet
+NSE_FO.csv
+XTS/*.csv
+alphabot*.csv
+*.parquet

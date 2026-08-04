@@ -1,0 +1,1386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Feed Bench Decision Dashboard</title>
+<style>
+  :root{
+    --bg:#0f1218;
+    --panel:#171c24;
+    --line:#283140;
+    --text:#dbe4f0;
+    --muted:#8ea0b8;
+    --accent:#2e7dd7;
+    --good:#26b36f;
+    --warn:#d7a12e;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --ui:Inter,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--ui)}
+  .wrap{width:100%;max-width:none;margin:0 auto;padding:28px 18px 40px}
+  h1{margin:0 0 6px;font-size:28px}
+  .sub{color:var(--muted);margin-bottom:22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+  .tabs{display:flex;gap:8px;margin:0 0 16px}
+  .tabbtn{padding:10px 14px;border-radius:8px;border:1px solid #344154;background:#1e2430;color:var(--text);cursor:pointer}
+  .tabbtn.active{background:#16304a;border-color:#2f4f72}
+  .tab{display:none}
+  .tab.active{display:block}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+  .split{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+  input,select,button{font:13px var(--mono)}
+  input,select{width:100%;padding:10px 12px;background:#0e131a;color:var(--text);border:1px solid var(--line);border-radius:8px}
+  button{padding:10px 14px;border-radius:8px;border:1px solid #2f4f72;background:#16304a;color:#fff;cursor:pointer}
+  button.secondary{background:#1e2430;border-color:#344154}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+  .row.push-between{justify-content:space-between;align-items:center}
+  .hint,.status,.note{color:var(--muted);font-size:12px}
+  .status{margin-top:10px;font-family:var(--mono);white-space:pre-wrap}
+  .metricgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+  .metric{border:1px solid var(--line);border-radius:10px;padding:12px;background:#111722}
+  .metric .k{font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em}
+  .metric .v{font:600 19px/1.2 var(--ui)}
+  .tablewrap{width:100%;overflow:auto;max-height:620px;border:1px solid var(--line);border-radius:8px}
+  table{width:100%;border-collapse:collapse;font:12px var(--mono)}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left}
+  th{position:sticky;top:0;background:var(--panel)}
+  .chart{display:flex;flex-direction:column;gap:8px}
+  .barrow{display:grid;grid-template-columns:minmax(120px,180px) minmax(120px,1fr) minmax(80px,120px);gap:10px;align-items:center}
+  .barlabel,.barvalue{font:12px var(--mono);color:var(--muted);overflow-wrap:anywhere}
+  .bartrack{height:14px;border-radius:999px;background:#0e131a;border:1px solid var(--line);overflow:hidden}
+  .barfill{height:100%;background:linear-gradient(90deg,var(--accent),#5aa8ff)}
+  .barfill.good{background:linear-gradient(90deg,#238a57,var(--good))}
+  .barfill.warn{background:linear-gradient(90deg,#8e641c,var(--warn))}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#102033;border:1px solid #274766;color:#9bc6ff;font:11px var(--mono)}
+  .empty{color:var(--muted);font-family:var(--mono)}
+  .winner{color:#7ee0a7}
+  .stack{display:flex;flex-direction:column;gap:10px}
+  .warnlist{display:flex;flex-direction:column;gap:10px}
+  .warnbox{border:1px solid var(--line);border-radius:10px;padding:12px;background:#111722}
+  .warnbox.high{border-color:#754141;background:#211417}
+  .warnbox.medium{border-color:#6c5a2b;background:#211d12}
+  .warnbox.low{border-color:#2b5b74;background:#111c24}
+  .warnbox .t{font:600 13px var(--ui);margin-bottom:4px}
+  .warnbox .m{font-size:12px;color:var(--muted)}
+  .notegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+  .infotable{width:100%;border-collapse:collapse}
+  .infotable td,.infotable th{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  .infotable th{font:12px var(--mono);color:var(--muted);text-align:left}
+  .small{font-size:12px;color:var(--muted)}
+  .verdict{font-size:13px;color:var(--text)}
+  .pillrow{display:flex;gap:8px;flex-wrap:wrap}
+  .pill{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid var(--line);background:#101620;font:11px var(--mono);color:var(--muted)}
+  .infocard{border:1px solid var(--line);border-radius:10px;background:#111722;padding:12px}
+  .infocard .title{font:600 13px var(--ui);margin-bottom:6px;overflow-wrap:anywhere}
+  .infocard .meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-top:8px}
+  .infocard .kv{min-width:0}
+  .infocard .kv .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}
+  .infocard .kv .v{font:12px var(--mono);overflow-wrap:anywhere;word-break:break-word}
+  .infotext{overflow-wrap:anywhere;word-break:break-word}
+  @media (max-width: 900px){
+    .wrap{padding:18px 12px 28px}
+    .card{padding:14px}
+    .barrow{grid-template-columns:1fr;gap:6px}
+    .barvalue{text-align:left}
+    .metric .v{font-size:17px}
+  }
+  @media (min-width: 1400px){
+    .wrap{padding-left:24px;padding-right:24px}
+    .grid{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+    .split{grid-template-columns:repeat(auto-fit,minmax(520px,1fr))}
+    .notegrid{grid-template-columns:repeat(auto-fit,minmax(360px,1fr))}
+  }
+  @media (min-width: 1800px){
+    .wrap{padding-left:28px;padding-right:28px}
+    .grid{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+    .split{grid-template-columns:repeat(auto-fit,minmax(640px,1fr))}
+    .notegrid{grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}
+  }
+  @media (max-width: 640px){
+    .tabs{flex-wrap:wrap}
+    .tabbtn{width:100%}
+    .grid,.split,.notegrid{grid-template-columns:1fr}
+    th,td{padding:7px 8px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Feed Decision Dashboard</h1>
+  <div class="sub">Choose one reference and rank the other source against it. Use `AlphaBot` as the reference when you want to measure which feed tracks your actual order placements more closely.</div>
+
+  <div class="card">
+    <div class="grid">
+      <div>
+        <label for="fcsv">FYERS CSV</label>
+        <input id="fcsv" placeholder="FYERS/fyers_live_1s_YYYY-MM-DD.csv">
+      </div>
+      <div>
+        <label for="dcsv">Dhan CSV</label>
+        <input id="dcsv" placeholder="Dhan/dhan_live_1s_YYYY-MM-DD.csv">
+      </div>
+      <div>
+        <label for="npar">Nubra CSV</label>
+        <input id="npar" placeholder="Nubra/nubra_live_ticks_YYYY-MM-DD.csv">
+      </div>
+      <div>
+        <label for="gpar">GDFL parquet</label>
+        <input id="gpar" placeholder="GDFL/YYYY-MM-DD.parquet">
+      </div>
+      <div>
+        <label for="xcsv">XTS CSV</label>
+        <input id="xcsv" placeholder="XTS/xts_live_1s_YYYY-MM-DD.csv">
+      </div>
+      <div>
+        <label for="alphacsv">AlphaBot CSV</label>
+        <input id="alphacsv" placeholder="alphabot_data.csv">
+      </div>
+      <div>
+        <label for="reference">Reference</label>
+        <select id="reference">
+          <option value="fyers">FYERS</option>
+          <option value="dhan">Dhan</option>
+          <option value="nubra">Nubra</option>
+          <option value="gdfl">GDFL</option>
+          <option value="alphabot">AlphaBot</option>
+        </select>
+      </div>
+      <div>
+        <label for="sym">Canonical Symbol</label>
+        <input id="sym" value="24400PE">
+      </div>
+      <div>
+        <label for="alphabroker">AlphaBot Broker Filter</label>
+        <input id="alphabroker" placeholder="PRO8015">
+      </div>
+      <div>
+        <label for="fromts">From</label>
+        <input id="fromts" placeholder="2026-07-24 09:15:00">
+      </div>
+      <div>
+        <label for="tots">To</label>
+        <input id="tots" placeholder="2026-07-24 15:30:00">
+      </div>
+      <div>
+        <label for="tol">Nearest Match Tolerance (sec)</label>
+        <input id="tol" value="120">
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button onclick="runDecision()">Run Decision Comparison</button>
+      <button class="secondary" onclick="loadDefaults()">Reload Defaults</button>
+    </div>
+    <div class="hint">`FYERS`, `Dhan`, `Nubra`, or `GDFL` reference = second-by-second feed comparison. `AlphaBot` reference = compare which feed is closer to your actual entry/exit timestamps and prices. `XTS` is currently used in the receive-time comparison and row browser sections.</div>
+    <div class="status" id="global-status"></div>
+  </div>
+
+  <div class="tabs">
+    <button id="tab-dashboard-btn" class="tabbtn active" onclick="showTab('dashboard')">Decision Dashboard</button>
+    <button id="tab-browser-btn" class="tabbtn" onclick="showTab('browser')">Data Browser</button>
+    <button id="tab-timing-btn" class="tabbtn" onclick="showTab('timing')">Receive vs Exchange Time</button>
+  </div>
+
+  <div id="tab-dashboard" class="tab active">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div class="badge" id="mode-badge">No comparison loaded</div>
+          <div class="note" id="mode-note" style="margin-top:8px">Choose a reference and run the dashboard.</div>
+        </div>
+        <div class="winner" id="winner-text"></div>
+      </div>
+      <div class="verdict" id="verdict-text" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <label>Overview</label>
+      <div id="overview-grid" class="metricgrid">
+        <div class="empty">Run the decision comparison to see ranked results.</div>
+      </div>
+    </div>
+
+    <div class="notegrid">
+      <div class="card">
+        <label>Warnings</label>
+        <div id="warnings-box" class="warnlist">
+          <div class="empty">Warnings and data-quality checks will appear here.</div>
+        </div>
+      </div>
+      <div class="card">
+        <label>How Score Works</label>
+        <div id="methodology-box" class="stack">
+          <div class="empty">Run a comparison to see the score basis and metric definitions.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notegrid">
+      <div class="card">
+        <label>Source Check</label>
+        <div id="sources-box" class="stack">
+          <div class="empty">Loaded source files and detected date ranges will appear here.</div>
+        </div>
+      </div>
+      <div class="card">
+        <label>Metric Guide</label>
+        <div id="metric-guide-box" class="stack">
+          <div class="empty">Metric definitions will appear here.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Receive Timing</label>
+      <div class="small" style="margin-bottom:10px">Compares the instrument timestamp carried by the feed with the exact local IST receive time saved by your system. This is the right place to inspect arrival delay and broker-to-broker timing gaps.</div>
+      <div id="receive-overview" class="metricgrid">
+        <div class="empty">Run the comparison to load receive-time metrics.</div>
+      </div>
+      <div class="split" style="margin-top:14px">
+        <div>
+          <label>Per Broker Delay</label>
+          <div class="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Broker</th>
+                  <th>Rows</th>
+                  <th>Active Secs</th>
+                  <th>Median Delay (ms)</th>
+                  <th>P90 Delay (ms)</th>
+                  <th>Max Delay (ms)</th>
+                  <th>Window</th>
+                </tr>
+              </thead>
+              <tbody id="receive-broker-body">
+                <tr><td colspan="7">No receive-time data yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <label>Pairwise Timing Gaps</label>
+          <div class="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Pair</th>
+                  <th>Overlap Secs</th>
+                  <th>Median Price Gap</th>
+                  <th>Median Listed Gap (ms)</th>
+                  <th>Median Received Gap (ms)</th>
+                  <th>P90 Received Gap (ms)</th>
+                  <th>Median Delay Gap (ms)</th>
+                </tr>
+              </thead>
+              <tbody id="receive-pair-body">
+                <tr><td colspan="7">No pairwise timing data yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px;margin-bottom:0">
+        <label>Largest Receive-Time Gaps</label>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Pair</th>
+                <th>Second</th>
+                <th>Left LTP</th>
+                <th>Right LTP</th>
+                <th>Price Abs Diff</th>
+                <th>Listed Gap (ms)</th>
+                <th>Received Gap (ms)</th>
+                <th>Delay Gap (ms)</th>
+              </tr>
+            </thead>
+            <tbody id="receive-detail-body">
+              <tr><td colspan="8">No timing-gap rows yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <label>Ranking</label>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Candidate</th>
+                <th>Score</th>
+                <th>Coverage %</th>
+                <th>Match %</th>
+                <th>Median Abs Diff</th>
+                <th>Avg Time Delta</th>
+              </tr>
+            </thead>
+            <tbody id="ranking-body">
+              <tr><td colspan="6">No ranking yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <label>Score Chart</label>
+        <div id="score-chart" class="chart">
+          <div class="empty">No chart yet.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <label>Comparison Chart</label>
+        <div id="component-chart" class="chart">
+          <div class="empty">No chart yet.</div>
+        </div>
+      </div>
+      <div class="card">
+        <label>Distribution</label>
+        <div id="distribution-chart" class="chart">
+          <div class="empty">No distribution yet.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Details</label>
+      <div class="tablewrap">
+        <table>
+          <thead id="detail-head"></thead>
+          <tbody id="detail-body">
+            <tr><td>No details yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-browser" class="tab">
+    <div class="card">
+      <div class="row">
+        <div>
+          <button class="secondary" onclick="showBrowserMode('mixed')" id="browser-mixed-btn">Mixed Rows</button>
+        </div>
+        <div>
+          <button class="secondary" onclick="showBrowserMode('paired')" id="browser-paired-btn">Paired Compare</button>
+        </div>
+        <div style="flex:1 1 150px">
+          <label for="pair-left">Left Broker</label>
+          <select id="pair-left">
+            <option value="fyers" selected>FYERS</option>
+            <option value="dhan">Dhan</option>
+            <option value="nubra">Nubra</option>
+          </select>
+        </div>
+        <div style="flex:1 1 150px">
+          <label for="pair-right">Right Broker</label>
+          <select id="pair-right">
+            <option value="fyers">FYERS</option>
+            <option value="dhan">Dhan</option>
+            <option value="nubra" selected>Nubra</option>
+          </select>
+        </div>
+        <div style="flex:1 1 240px">
+          <label for="bsym">Search Symbol</label>
+          <input id="bsym" placeholder="24400PE">
+        </div>
+        <div style="flex:1 1 220px">
+          <label for="bfrom">From</label>
+          <input id="bfrom" placeholder="2026-07-24 09:15:00">
+        </div>
+        <div style="flex:1 1 220px">
+          <label for="bto">To</label>
+          <input id="bto" placeholder="2026-07-24 15:30:00">
+        </div>
+        <div style="flex:1 1 120px">
+          <label for="blimit">Rows</label>
+          <input id="blimit" value="300">
+        </div>
+        <div>
+          <button onclick="runBrowserAction()">Run Browser</button>
+        </div>
+      </div>
+      <div class="status" id="browser-status"></div>
+    </div>
+    <div class="card" id="browser-mixed-card">
+      <div class="row push-between" style="margin-bottom:12px">
+        <label style="margin:0">Fetched mixed rows</label>
+        <button class="secondary" id="browser-mixed-download-btn" onclick="downloadBrowserMixedXlsx()" disabled>Download XLSX</button>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Broker</th>
+              <th>Timestamp (IST)</th>
+              <th>Listed At (IST)</th>
+              <th>Received At (IST)</th>
+              <th>Delay (ms)</th>
+              <th>Canonical Symbol</th>
+              <th>Native Symbol</th>
+              <th>LTP</th>
+              <th>O</th>
+              <th>H</th>
+              <th>L</th>
+              <th>C</th>
+              <th>Ask</th>
+              <th>Bid</th>
+              <th>Volume</th>
+              <th>OI</th>
+              <th>Type</th>
+            </tr>
+          </thead>
+          <tbody id="browser-body">
+            <tr><td colspan="17">No rows loaded.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="browser-paired-card" style="display:none">
+      <div id="paired-overview" class="metricgrid">
+        <div class="empty">Run paired compare to align any two broker feeds by second.</div>
+      </div>
+      <div class="row push-between" style="margin-top:14px;margin-bottom:12px">
+        <label style="margin:0">Fetched paired rows</label>
+        <button class="secondary" id="browser-paired-download-btn" onclick="downloadBrowserPairedXlsx()" disabled>Download XLSX</button>
+      </div>
+      <div class="tablewrap" style="margin-top:14px">
+        <table>
+          <thead>
+            <tr>
+              <th>Second</th>
+              <th>Presence</th>
+              <th id="paired-left-ltp-head">Left LTP</th>
+              <th id="paired-right-ltp-head">Right LTP</th>
+              <th>LTP Diff</th>
+              <th id="paired-left-listed-head">Left Listed</th>
+              <th id="paired-right-listed-head">Right Listed</th>
+              <th>Listed Gap (ms)</th>
+              <th id="paired-left-received-head">Left Received</th>
+              <th id="paired-right-received-head">Right Received</th>
+              <th>Received Gap (ms)</th>
+              <th id="paired-left-delay-head">Left Delay (ms)</th>
+              <th id="paired-right-delay-head">Right Delay (ms)</th>
+              <th>Delay Gap (ms)</th>
+            </tr>
+          </thead>
+          <tbody id="paired-body">
+            <tr><td colspan="14">No paired rows loaded.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-timing" class="tab">
+    <div class="card">
+      <div class="small" style="margin-bottom:10px">For every captured tick this compares the <b>exchange (listed) timestamp the feed stamped</b> with the <b>local IST time your system actually received it</b>. Delay = received &minus; listed. Uses the FYERS / Nubra / XTS paths from the form at the top &mdash; leave a path blank to exclude that feed.</div>
+      <div class="row">
+        <div style="flex:1 1 240px">
+          <label for="tsym">Symbol</label>
+          <input id="tsym" placeholder="NIFTY26AUGFUT">
+        </div>
+        <div style="flex:1 1 200px">
+          <label for="tfrom">From</label>
+          <input id="tfrom" placeholder="2026-07-30 09:15:00">
+        </div>
+        <div style="flex:1 1 200px">
+          <label for="tto">To</label>
+          <input id="tto" placeholder="2026-07-30 15:30:00">
+        </div>
+        <div style="flex:1 1 110px">
+          <label for="tlimit">Rows</label>
+          <input id="tlimit" value="300">
+        </div>
+        <div>
+          <button onclick="runTimingRows()">Run Timing Comparison</button>
+        </div>
+      </div>
+      <div class="status" id="timing-sources"></div>
+      <div id="timing-overview" class="metricgrid" style="margin-top:10px">
+        <div class="empty">Run the timing comparison to load receive-vs-exchange metrics.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Per-broker arrival delay</label>
+      <div class="small" style="margin-bottom:8px">Delay is how long after the exchange timestamp each feed reached your machine. Lower and tighter is better.</div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Broker</th><th>Rows</th>
+              <th>Listed From</th><th>Listed To</th>
+              <th>Received From</th><th>Received To</th>
+              <th>Median Delay (ms)</th><th>P90 Delay (ms)</th>
+              <th>Max Delay (ms)</th><th>Min Delay (ms)</th>
+            </tr>
+          </thead>
+          <tbody id="timing-summary-body">
+            <tr><td colspan="10">No timing data yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Per-instrument: exchange time vs received time (worst delay first)</label>
+      <div class="row push-between" style="margin-bottom:12px">
+        <div class="small">Exports only the currently fetched timing table rows.</div>
+        <button class="secondary" id="timing-download-btn" onclick="downloadTimingRowsXlsx()" disabled>Download XLSX</button>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Broker</th><th>Symbol</th>
+              <th>Listed / Exchange Time (IST)</th>
+              <th>Received Time (IST)</th>
+              <th>Delay (ms)</th><th>LTP</th>
+            </tr>
+          </thead>
+          <tbody id="timing-rows-body">
+            <tr><td colspan="6">No timing rows yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const tableExports = {
+  browserMixed: { section: 'browser_mixed', symbol: '', columns: [], rows: [] },
+  browserPaired: { section: 'browser_paired', symbol: '', columns: [], rows: [] },
+  timingRows: { section: 'timing_rows', symbol: '', columns: [], rows: [] },
+};
+
+const EXPORT_COLUMNS = {
+  browserMixed: [
+    {key:'broker', label:'Broker'},
+    {key:'timestamp_ist', label:'Timestamp (IST)'},
+    {key:'listed_at_ist', label:'Listed At (IST)'},
+    {key:'received_at_ist', label:'Received At (IST)'},
+    {key:'receive_delay_ms', label:'Delay (ms)'},
+    {key:'canonical_symbol', label:'Canonical Symbol'},
+    {key:'native_symbol', label:'Native Symbol'},
+    {key:'ltp', label:'LTP'},
+    {key:'o', label:'O'},
+    {key:'h', label:'H'},
+    {key:'l', label:'L'},
+    {key:'c', label:'C'},
+    {key:'ask', label:'Ask'},
+    {key:'bid', label:'Bid'},
+    {key:'volume', label:'Volume'},
+    {key:'oi', label:'OI'},
+    {key:'message_type', label:'Type'},
+  ],
+  browserPaired: [
+    {key:'sec', label:'Second'},
+    {key:'presence', label:'Presence'},
+    {key:'left_ltp', label:'Left LTP'},
+    {key:'right_ltp', label:'Right LTP'},
+    {key:'ltp_diff', label:'LTP Diff'},
+    {key:'left_listed_at_ist', label:'Left Listed'},
+    {key:'right_listed_at_ist', label:'Right Listed'},
+    {key:'listed_gap_ms', label:'Listed Gap (ms)'},
+    {key:'left_received_at_ist', label:'Left Received'},
+    {key:'right_received_at_ist', label:'Right Received'},
+    {key:'received_gap_ms', label:'Received Gap (ms)'},
+    {key:'left_delay_ms', label:'Left Delay (ms)'},
+    {key:'right_delay_ms', label:'Right Delay (ms)'},
+    {key:'delay_gap_ms', label:'Delay Gap (ms)'},
+  ],
+  timingRows: [
+    {key:'broker', label:'Broker'},
+    {key:'symbol', label:'Symbol'},
+    {key:'listed_at_ist', label:'Listed / Exchange Time (IST)'},
+    {key:'received_at_ist', label:'Received Time (IST)'},
+    {key:'delay_ms', label:'Delay (ms)'},
+    {key:'ltp', label:'LTP'},
+  ],
+};
+
+function showTab(name){
+  document.getElementById('tab-dashboard').classList.toggle('active', name === 'dashboard');
+  document.getElementById('tab-browser').classList.toggle('active', name === 'browser');
+  document.getElementById('tab-timing').classList.toggle('active', name === 'timing');
+  document.getElementById('tab-dashboard-btn').classList.toggle('active', name === 'dashboard');
+  document.getElementById('tab-browser-btn').classList.toggle('active', name === 'browser');
+  document.getElementById('tab-timing-btn').classList.toggle('active', name === 'timing');
+}
+
+async function fetchJson(url, body){
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  return await res.json();
+}
+
+async function downloadXlsx(payload){
+  const res = await fetch('/api/export/xlsx', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  if(!res.ok){
+    let message = `download failed (${res.status})`;
+    try{
+      const data = await res.json();
+      message = data.error || message;
+    }catch(_err){
+      // Keep the generic HTTP error if the response is not JSON.
+    }
+    throw new Error(message);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="?([^"]+)"?/i);
+  const filename = match && match[1] ? match[1] : `${payload.section || 'export'}.xlsx`;
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+function esc(v){
+  return String(v ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function fmt(v, digits = 4){
+  if(v === null || v === undefined || v === '') return '';
+  const n = Number(v);
+  if(Number.isNaN(n)) return String(v);
+  return n.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+function brokerLabel(v){
+  const key = String(v || '').trim().toLowerCase();
+  if(key === 'fyers') return 'FYERS';
+  if(key === 'dhan') return 'Dhan';
+  if(key === 'nubra') return 'Nubra';
+  return key ? key.charAt(0).toUpperCase() + key.slice(1) : '';
+}
+
+function setGlobalStatus(msg){
+  document.getElementById('global-status').textContent = msg || '';
+}
+
+function setExportState(key, symbol, rows){
+  const state = tableExports[key];
+  if(!state) return;
+  state.symbol = symbol || '';
+  state.columns = EXPORT_COLUMNS[key] || [];
+  state.rows = Array.isArray(rows) ? rows : [];
+}
+
+function setButtonDisabled(id, disabled){
+  const el = document.getElementById(id);
+  if(el) el.disabled = !!disabled;
+}
+
+function renderCards(items){
+  const el = document.getElementById('overview-grid');
+  if(!items || !items.length){
+    el.innerHTML = '<div class="empty">Run the decision comparison to see ranked results.</div>';
+    return;
+  }
+  el.innerHTML = items.map(([k, v]) => `
+    <div class="metric">
+      <div class="k">${esc(k)}</div>
+      <div class="v">${esc(v)}</div>
+    </div>
+  `).join('');
+}
+
+function renderBars(elId, rows, mode='score'){
+  const el = document.getElementById(elId);
+  if(!rows || !rows.length){
+    el.innerHTML = '<div class="empty">No chart yet.</div>';
+    return;
+  }
+  const max = Math.max(...rows.map(r => Number(r.value || 0)), 1);
+  el.innerHTML = rows.map(r => {
+    const numericValue = Number(r.value || 0);
+    const width = Math.max(2, Math.min(100, Math.round((numericValue / max) * 100)));
+    const klass = mode === 'score' ? 'good' : (mode === 'distribution' ? 'warn' : '');
+    const shown = r.display || fmt(r.value, 2);
+    return `
+      <div class="barrow">
+        <div class="barlabel">${esc(r.label)}</div>
+        <div class="bartrack"><div class="barfill ${klass}" style="width:${width}%"></div></div>
+        <div class="barvalue">${esc(shown)}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderDistribution(rows){
+  renderBars('distribution-chart', (rows || []).map(r => ({label:r.label, value:r.count})), 'distribution');
+}
+
+function renderRanking(rows){
+  const body = document.getElementById('ranking-body');
+  if(!rows || !rows.length){
+    body.innerHTML = '<tr><td colspan="6">No ranking yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${esc(r.candidate)}</td>
+      <td>${esc(fmt(r.score, 2))}</td>
+      <td>${esc(fmt(r.coverage_pct, 2))}</td>
+      <td>${esc(fmt(r.match_pct, 2))}</td>
+      <td>${esc(fmt(r.median_abs_diff, 6))}</td>
+      <td>${esc(fmt(r.avg_time_delta_sec, 3))}</td>
+    </tr>
+  `).join('');
+}
+
+function renderWarnings(rows){
+  const el = document.getElementById('warnings-box');
+  if(!rows || !rows.length){
+    el.innerHTML = '<div class="empty">No immediate warning signs detected in the selected inputs.</div>';
+    return;
+  }
+  el.innerHTML = rows.map(r => `
+    <div class="warnbox ${esc(r.level || 'low')}">
+      <div class="t">${esc(r.title || 'Warning')}</div>
+      <div class="m">${esc(r.message || '')}</div>
+    </div>
+  `).join('');
+}
+
+function renderMethodology(methodology){
+  const mbox = document.getElementById('methodology-box');
+  const gbox = document.getElementById('metric-guide-box');
+  if(!methodology || !Object.keys(methodology).length){
+    mbox.innerHTML = '<div class="empty">Run a comparison to see the score basis and metric definitions.</div>';
+    gbox.innerHTML = '<div class="empty">Metric definitions will appear here.</div>';
+    return;
+  }
+  mbox.innerHTML = `
+    <div class="infotext">${esc(methodology.summary || '')}</div>
+    <div class="pillrow">
+      <span class="pill">${esc(methodology.score_formula || '')}</span>
+    </div>
+    <div class="small infotext">${esc((methodology.notes || []).join(' '))}</div>
+  `;
+  const fields = methodology.fields || [];
+  if(!fields.length){
+    gbox.innerHTML = '<div class="empty">No metric guide provided.</div>';
+    return;
+  }
+  gbox.innerHTML = fields.map(f => `
+    <div class="infocard">
+      <div class="title">${esc(f.field)}</div>
+      <div class="kv">
+        <div class="k">Meaning</div>
+        <div class="v">${esc(f.meaning)}</div>
+      </div>
+      <div class="kv" style="margin-top:8px">
+        <div class="k">How To Read It</div>
+        <div class="v">${esc(f.good_sign)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderSources(rows){
+  const el = document.getElementById('sources-box');
+  if(!rows || !rows.length){
+    el.innerHTML = '<div class="empty">Loaded source files and detected date ranges will appear here.</div>';
+    return;
+  }
+  el.innerHTML = rows.map(r => `
+    <div class="infocard">
+      <div class="title">${esc(r.source || '')}</div>
+      <div class="small infotext">${esc(r.path || '')}</div>
+      <div class="meta">
+        <div class="kv">
+          <div class="k">Detected Dates</div>
+          <div class="v">${esc((r.detected_dates || []).join(', ') || '-')}</div>
+        </div>
+        <div class="kv">
+          <div class="k">Rows</div>
+          <div class="v">${esc(r.rows ?? '')}</div>
+        </div>
+        <div class="kv">
+          <div class="k">Active Secs</div>
+          <div class="v">${esc(r.active_seconds ?? '-')}</div>
+        </div>
+        <div class="kv">
+          <div class="k">Window</div>
+          <div class="v">${esc(r.from_ts || '')}${r.to_ts ? ' -> ' + esc(r.to_ts) : ''}</div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderDetailTable(mode, rows){
+  const head = document.getElementById('detail-head');
+  const body = document.getElementById('detail-body');
+  if(!rows || !rows.length){
+    head.innerHTML = '';
+    body.innerHTML = '<tr><td>No details yet.</td></tr>';
+    return;
+  }
+  if(mode === 'broker'){
+    head.innerHTML = '<tr><th>Candidate</th><th>Second</th><th>Reference LTP</th><th>Candidate LTP</th><th>Diff</th><th>Abs Diff</th><th>Ref Ticks</th><th>Candidate Ticks</th></tr>';
+    body.innerHTML = rows.map(r => `
+      <tr>
+        <td>${esc(r.candidate)}</td>
+        <td>${esc(r.sec)}</td>
+        <td>${esc(fmt(r.ltp_ref, 6))}</td>
+        <td>${esc(fmt(r.ltp_cmp, 6))}</td>
+        <td>${esc(fmt(r.diff, 6))}</td>
+        <td>${esc(fmt(r.abs_diff, 6))}</td>
+        <td>${esc(r.ticks_ref)}</td>
+        <td>${esc(r.ticks_cmp)}</td>
+      </tr>
+    `).join('');
+    return;
+  }
+  head.innerHTML = '<tr><th>Alpha Broker</th><th>Symbol</th><th>Entry At</th><th>Entry Price</th><th>FYERS Entry Diff</th><th>Nubra Entry Diff</th><th>GDFL Entry Diff</th><th>Exit At</th><th>Exit Price</th><th>FYERS Exit Diff</th><th>Nubra Exit Diff</th><th>GDFL Exit Diff</th><th>PnL</th></tr>';
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${esc(r.alphabot_broker)}</td>
+      <td>${esc(r.native_symbol || r.canonical_symbol)}</td>
+      <td>${esc(r.entry_at)}</td>
+      <td>${esc(fmt(r.entry_price, 6))}</td>
+      <td>${esc(fmt(r.fyers_entry_diff, 6))}</td>
+      <td>${esc(fmt(r.nubra_entry_diff, 6))}</td>
+      <td>${esc(fmt(r.gdfl_entry_diff, 6))}</td>
+      <td>${esc(r.exit_at)}</td>
+      <td>${esc(fmt(r.exit_price, 6))}</td>
+      <td>${esc(fmt(r.fyers_exit_diff, 6))}</td>
+      <td>${esc(fmt(r.nubra_exit_diff, 6))}</td>
+      <td>${esc(fmt(r.gdfl_exit_diff, 6))}</td>
+      <td>${esc(fmt(r.pnl, 2))}</td>
+    </tr>
+  `).join('');
+}
+
+function renderBrowserRows(rows){
+  const body = document.getElementById('browser-body');
+  setExportState('browserMixed', readVal('bsym') || readVal('sym') || '', rows || []);
+  setButtonDisabled('browser-mixed-download-btn', !(rows && rows.length));
+  if(!rows || !rows.length){
+    body.innerHTML = '<tr><td colspan="17">No matching rows.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${esc(r.broker)}</td>
+      <td>${esc(r.timestamp_ist)}</td>
+      <td>${esc(r.listed_at_ist)}</td>
+      <td>${esc(r.received_at_ist)}</td>
+      <td>${esc(fmt(r.receive_delay_ms, 3))}</td>
+      <td>${esc(r.canonical_symbol)}</td>
+      <td>${esc(r.native_symbol)}</td>
+      <td>${esc(r.ltp)}</td>
+      <td>${esc(r.o)}</td>
+      <td>${esc(r.h)}</td>
+      <td>${esc(r.l)}</td>
+      <td>${esc(r.c)}</td>
+      <td>${esc(r.ask)}</td>
+      <td>${esc(r.bid)}</td>
+      <td>${esc(r.volume)}</td>
+      <td>${esc(r.oi)}</td>
+      <td>${esc(r.message_type)}</td>
+    </tr>
+  `).join('');
+}
+
+let browserMode = 'mixed';
+
+function setBrowserButtons(){
+  const mixed = document.getElementById('browser-mixed-btn');
+  const paired = document.getElementById('browser-paired-btn');
+  if(mixed) mixed.classList.toggle('secondary', browserMode !== 'mixed');
+  if(paired) paired.classList.toggle('secondary', browserMode !== 'paired');
+}
+
+function showBrowserMode(mode){
+  browserMode = mode === 'paired' ? 'paired' : 'mixed';
+  const mixedCard = document.getElementById('browser-mixed-card');
+  const pairedCard = document.getElementById('browser-paired-card');
+  if(mixedCard) mixedCard.style.display = browserMode === 'mixed' ? '' : 'none';
+  if(pairedCard) pairedCard.style.display = browserMode === 'paired' ? '' : 'none';
+  setBrowserButtons();
+}
+
+function renderPairedRows(out){
+  const ov = document.getElementById('paired-overview');
+  const body = document.getElementById('paired-body');
+  if(!out || !out.ok){
+    setExportState('browserPaired', readVal('bsym') || readVal('sym') || '', []);
+    setButtonDisabled('browser-paired-download-btn', true);
+    ov.innerHTML = '<div class="empty">Paired compare unavailable.</div>';
+    body.innerHTML = '<tr><td colspan="14">No paired rows loaded.</td></tr>';
+    return;
+  }
+  const overview = out.overview || {};
+  const summary = out.summary || {};
+  const leftLabel = brokerLabel(overview.left_broker || readVal('pair-left') || 'left');
+  const rightLabel = brokerLabel(overview.right_broker || readVal('pair-right') || 'right');
+  const labels = {
+    leftLtp: document.getElementById('paired-left-ltp-head'),
+    rightLtp: document.getElementById('paired-right-ltp-head'),
+    leftListed: document.getElementById('paired-left-listed-head'),
+    rightListed: document.getElementById('paired-right-listed-head'),
+    leftReceived: document.getElementById('paired-left-received-head'),
+    rightReceived: document.getElementById('paired-right-received-head'),
+    leftDelay: document.getElementById('paired-left-delay-head'),
+    rightDelay: document.getElementById('paired-right-delay-head'),
+  };
+  if(labels.leftLtp) labels.leftLtp.textContent = `${leftLabel} LTP`;
+  if(labels.rightLtp) labels.rightLtp.textContent = `${rightLabel} LTP`;
+  if(labels.leftListed) labels.leftListed.textContent = `${leftLabel} Listed`;
+  if(labels.rightListed) labels.rightListed.textContent = `${rightLabel} Listed`;
+  if(labels.leftReceived) labels.leftReceived.textContent = `${leftLabel} Received`;
+  if(labels.rightReceived) labels.rightReceived.textContent = `${rightLabel} Received`;
+  if(labels.leftDelay) labels.leftDelay.textContent = `${leftLabel} Delay (ms)`;
+  if(labels.rightDelay) labels.rightDelay.textContent = `${rightLabel} Delay (ms)`;
+  const cards = [
+    ['Symbol', overview.symbol || ''],
+    ['Left Broker', leftLabel],
+    ['Right Broker', rightLabel],
+    ['From', overview.from_ts || ''],
+    ['To', overview.to_ts || ''],
+    ['Seconds', summary.seconds || 0],
+    ['Both', summary.both || 0],
+    [`${leftLabel} Only`, summary.left_only || 0],
+    [`${rightLabel} Only`, summary.right_only || 0],
+    ['Median Abs LTP Diff', fmt(summary.median_abs_ltp_diff, 6)],
+    ['Median Received Gap (ms)', fmt(summary.median_received_gap_ms, 3)],
+  ];
+  ov.innerHTML = cards.map(([k,v]) => `<div class="metric"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+  const rows = out.rows || [];
+  setExportState('browserPaired', overview.symbol || readVal('bsym') || readVal('sym') || '', rows);
+  setButtonDisabled('browser-paired-download-btn', !rows.length);
+  body.innerHTML = rows.length ? rows.map(r => `
+    <tr>
+      <td>${esc(r.sec)}</td>
+      <td>${esc(r.presence)}</td>
+      <td>${esc(fmt(r.left_ltp, 6))}</td>
+      <td>${esc(fmt(r.right_ltp, 6))}</td>
+      <td>${esc(fmt(r.ltp_diff, 6))}</td>
+      <td>${esc(r.left_listed_at_ist)}</td>
+      <td>${esc(r.right_listed_at_ist)}</td>
+      <td>${esc(fmt(r.listed_gap_ms, 3))}</td>
+      <td>${esc(r.left_received_at_ist)}</td>
+      <td>${esc(r.right_received_at_ist)}</td>
+      <td>${esc(fmt(r.received_gap_ms, 3))}</td>
+      <td>${esc(fmt(r.left_delay_ms, 3))}</td>
+      <td>${esc(fmt(r.right_delay_ms, 3))}</td>
+      <td>${esc(fmt(r.delay_gap_ms, 3))}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="14">No paired rows loaded.</td></tr>';
+}
+
+function renderReceiveTiming(out){
+  const overview = document.getElementById('receive-overview');
+  const brokerBody = document.getElementById('receive-broker-body');
+  const pairBody = document.getElementById('receive-pair-body');
+  const detailBody = document.getElementById('receive-detail-body');
+  if(!out || !out.ok){
+    overview.innerHTML = '<div class="empty">Receive-time comparison unavailable.</div>';
+    brokerBody.innerHTML = '<tr><td colspan="7">No receive-time data yet.</td></tr>';
+    pairBody.innerHTML = '<tr><td colspan="7">No pairwise timing data yet.</td></tr>';
+    detailBody.innerHTML = '<tr><td colspan="8">No timing-gap rows yet.</td></tr>';
+    return;
+  }
+  const ov = out.overview || {};
+  const brokers = out.brokers || [];
+  const pairs = out.pairs || [];
+  const details = out.details || [];
+  const cards = [
+    ['Symbol', ov.symbol || ''],
+    ['Rows', ov.rows || 0],
+    ['From', ov.from_ts || ''],
+    ['To', ov.to_ts || ''],
+    ['Brokers', (ov.brokers_loaded || []).join(', ') || ''],
+  ];
+  overview.innerHTML = cards.map(([k, v]) => `
+    <div class="metric">
+      <div class="k">${esc(k)}</div>
+      <div class="v">${esc(v)}</div>
+    </div>
+  `).join('');
+  brokerBody.innerHTML = brokers.length ? brokers.map(r => `
+    <tr>
+      <td>${esc(r.broker)}</td>
+      <td>${esc(r.rows)}</td>
+      <td>${esc(r.active_seconds)}</td>
+      <td>${esc(fmt(r.median_delay_ms, 3))}</td>
+      <td>${esc(fmt(r.p90_delay_ms, 3))}</td>
+      <td>${esc(fmt(r.max_delay_ms, 3))}</td>
+      <td>${esc(r.from_ts || '')}${r.to_ts ? ' -> ' + esc(r.to_ts) : ''}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="7">No receive-time data yet.</td></tr>';
+  pairBody.innerHTML = pairs.length ? pairs.map(r => `
+    <tr>
+      <td>${esc(r.pair)}</td>
+      <td>${esc(r.overlap_seconds)}</td>
+      <td>${esc(fmt(r.median_price_abs_diff, 6))}</td>
+      <td>${esc(fmt(r.median_listed_gap_ms, 3))}</td>
+      <td>${esc(fmt(r.median_received_gap_ms, 3))}</td>
+      <td>${esc(fmt(r.p90_received_gap_ms, 3))}</td>
+      <td>${esc(fmt(r.median_delay_gap_ms, 3))}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="7">No pairwise timing data yet.</td></tr>';
+  detailBody.innerHTML = details.length ? details.map(r => `
+    <tr>
+      <td>${esc(r.pair)}</td>
+      <td>${esc(r.sec)}</td>
+      <td>${esc(fmt(r.ltp_left, 6))}</td>
+      <td>${esc(fmt(r.ltp_right, 6))}</td>
+      <td>${esc(fmt(r.price_abs_diff, 6))}</td>
+      <td>${esc(fmt(r.listed_gap_ms, 3))}</td>
+      <td>${esc(fmt(r.received_gap_ms, 3))}</td>
+      <td>${esc(fmt(r.delay_gap_ms, 3))}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="8">No timing-gap rows yet.</td></tr>';
+}
+
+function decisionBody(){
+  return {
+    reference: (document.getElementById('reference').value || 'fyers').trim(),
+    fyers_csv: (document.getElementById('fcsv').value || '').trim() || null,
+    dhan_csv: (document.getElementById('dcsv').value || '').trim() || null,
+    nubra_csv: (document.getElementById('npar').value || '').trim() || null,
+    gdfl_parquet: (document.getElementById('gpar').value || '').trim() || null,
+    xts_csv: (document.getElementById('xcsv').value || '').trim() || null,
+    alpha_csv: (document.getElementById('alphacsv').value || '').trim() || null,
+    symbol: (document.getElementById('sym').value || '').trim() || '24400PE',
+    from_ts: (document.getElementById('fromts').value || '').trim() || null,
+    to_ts: (document.getElementById('tots').value || '').trim() || null,
+    alphabot_broker: (document.getElementById('alphabroker').value || '').trim() || null,
+    tolerance_seconds: parseInt(document.getElementById('tol').value || '120', 10) || 120,
+    limit: 200,
+  };
+}
+
+async function runReceiveCompare(){
+  const body = {
+    fyers_csv: (document.getElementById('fcsv').value || '').trim() || null,
+    dhan_csv: (document.getElementById('dcsv').value || '').trim() || null,
+    nubra_csv: (document.getElementById('npar').value || '').trim() || null,
+    xts_csv: (document.getElementById('xcsv').value || '').trim() || null,
+    symbol: (document.getElementById('sym').value || '').trim() || '24400PE',
+    from_ts: (document.getElementById('fromts').value || '').trim() || null,
+    to_ts: (document.getElementById('tots').value || '').trim() || null,
+  };
+  const out = await fetchJson('/api/report/receive-compare', body);
+  renderReceiveTiming(out);
+}
+
+async function runDecision(){
+  setGlobalStatus('running decision comparison...');
+  const out = await fetchJson('/api/report/decision', decisionBody());
+  if(!out.ok){
+    setGlobalStatus(out.error || 'failed');
+    renderCards([]);
+    renderWarnings([]);
+    renderMethodology(null);
+    renderSources([]);
+    renderRanking([]);
+    renderBars('score-chart', []);
+    renderBars('component-chart', []);
+    renderDistribution([]);
+    renderDetailTable('broker', []);
+    renderReceiveTiming(null);
+    document.getElementById('verdict-text').textContent = '';
+    return;
+  }
+  const overview = out.overview || {};
+  const ranking = out.ranking || [];
+  const charts = out.charts || {};
+  const warnings = out.warnings || [];
+  const methodology = out.methodology || {};
+  const sources = out.sources || [];
+  document.getElementById('mode-badge').textContent = overview.mode ? `${overview.mode} reference` : 'No comparison loaded';
+  document.getElementById('mode-note').textContent =
+    overview.mode === 'alphabot'
+      ? 'AlphaBot is the reference. Higher score means the feed tracks your entry/exit timings and prices more closely.'
+      : 'The selected feed is the reference. Higher score means the other feed overlaps better and differs less.';
+  document.getElementById('winner-text').textContent = overview.winner ? `Best fit: ${overview.winner} (${fmt(overview.best_score, 2)})` : '';
+  document.getElementById('verdict-text').textContent = out.verdict || '';
+  const cards = overview.mode === 'alphabot'
+    ? [
+        ['Reference', 'AlphaBot'],
+        ['Trade Count', overview.trade_count || 0],
+        ['From', overview.from_ts || ''],
+        ['To', overview.to_ts || ''],
+        ['Winner', overview.winner || ''],
+        ['Best Score', fmt(overview.best_score, 2)],
+      ]
+    : [
+        ['Reference', overview.reference || ''],
+        ['Symbol', overview.symbol || ''],
+        ['From', overview.from_ts || ''],
+        ['To', overview.to_ts || ''],
+        ['Winner', overview.winner || ''],
+        ['Best Score', fmt(overview.best_score, 2)],
+      ];
+  renderCards(cards);
+  renderWarnings(warnings);
+  renderMethodology(methodology);
+  renderSources(sources);
+  renderRanking(ranking);
+  renderBars('score-chart', charts.score_bars || [], 'score');
+  renderBars('component-chart', charts.component_bars || [], 'component');
+  renderDistribution(charts.distribution || []);
+  renderDetailTable(out.mode || 'broker', out.details || []);
+  await runReceiveCompare();
+  setGlobalStatus('decision comparison loaded');
+}
+
+async function browseRows(){
+  const status = document.getElementById('browser-status');
+  status.textContent = 'loading rows...';
+  const body = {
+    fyers_csv: (document.getElementById('fcsv').value || '').trim() || null,
+    dhan_csv: (document.getElementById('dcsv').value || '').trim() || null,
+    nubra_csv: (document.getElementById('npar').value || '').trim() || null,
+    gdfl_parquet: (document.getElementById('gpar').value || '').trim() || null,
+    xts_csv: (document.getElementById('xcsv').value || '').trim() || null,
+    symbol: (document.getElementById('bsym').value || '').trim() || (document.getElementById('sym').value || '').trim(),
+    from_ts: (document.getElementById('bfrom').value || '').trim() || null,
+    to_ts: (document.getElementById('bto').value || '').trim() || null,
+    limit: parseInt(document.getElementById('blimit').value || '300', 10) || 300,
+  };
+  const out = await fetchJson('/api/browse/rows', body);
+  renderBrowserRows(out.rows || []);
+  const brokers = out.brokers || {};
+  status.textContent = out.ok
+    ? `loaded ${out.count || 0} rows` + (Object.keys(brokers).length ? ` | ` + Object.entries(brokers).map(([k, v]) => `${k}: ${v}`).join(', ') : '')
+    : (out.error || 'failed');
+  if(out.sources && out.sources.length){
+    status.innerHTML = (out.ok ? `loaded ${out.count || 0} rows &nbsp;·&nbsp; ` : (out.error || 'failed') + ' &nbsp;·&nbsp; ')
+      + out.sources.map(s => {
+          const ok = s.status === 'loaded';
+          const color = ok ? 'var(--good, #7ee787)' : 'var(--muted, #8b949e)';
+          const avail = (s.available && s.available.length) ? ` <span style="color:var(--muted,#8b949e)">(try: ${s.available.slice(0,4).map(esc).join(', ')}${s.available.length>4?', …':''})</span>` : '';
+          return `<span style="color:${color}">${esc(s.broker)}: ${ok ? 'loaded ('+s.rows+')' : esc(s.status)}</span>${avail}`;
+        }).join(' &nbsp;·&nbsp; ');
+  }
+}
+
+async function browsePaired(){
+  const status = document.getElementById('browser-status');
+  status.textContent = 'loading paired compare...';
+  const body = {
+    fyers_csv: readVal('fcsv'),
+    dhan_csv: readVal('dcsv'),
+    nubra_csv: readVal('npar'),
+    left_broker: readVal('pair-left') || 'fyers',
+    right_broker: readVal('pair-right') || 'nubra',
+    symbol: readVal('bsym') || readVal('sym'),
+    from_ts: readVal('bfrom'),
+    to_ts: readVal('bto'),
+    limit: parseInt(document.getElementById('blimit').value || '300', 10) || 300,
+  };
+  const out = await fetchJson('/api/browse/paired', body);
+  renderPairedRows(out);
+  renderSourceChips('browser-status', out.sources || []);
+  const summary = out.summary || {};
+  const leftLabel = brokerLabel((out.overview || {}).left_broker || body.left_broker);
+  const rightLabel = brokerLabel((out.overview || {}).right_broker || body.right_broker);
+  const prefix = out.ok
+    ? `paired seconds ${summary.seconds || 0} · both ${summary.both || 0} · ${leftLabel.toLowerCase()}_only ${summary.left_only || 0} · ${rightLabel.toLowerCase()}_only ${summary.right_only || 0}`
+    : (out.error || 'failed');
+  const current = document.getElementById('browser-status').innerHTML;
+  document.getElementById('browser-status').innerHTML = prefix + (current ? ' &nbsp;·&nbsp; ' + current : '');
+}
+
+async function runBrowserAction(){
+  if(browserMode === 'paired'){
+    await browsePaired();
+    return;
+  }
+  await browseRows();
+}
+
+async function loadDefaults(){
+  setGlobalStatus('loading defaults...');
+  try{
+    const cfg = await (await fetch('/api/config')).json();
+    const d = cfg.defaults || {};
+    document.getElementById('fcsv').value = d.fyers_csv || '';
+    document.getElementById('dcsv').value = d.dhan_csv || '';
+    document.getElementById('npar').value = d.nubra_csv || d.nubra_parquet || '';
+    document.getElementById('gpar').value = d.gdfl_parquet || '';
+    document.getElementById('xcsv').value = d.xts_csv || '';
+    document.getElementById('alphacsv').value = d.alphabot_csv || '';
+    document.getElementById('sym').value = d.symbol || '24400PE';
+    document.getElementById('bsym').value = d.symbol || '24400PE';
+    const tsymEl = document.getElementById('tsym'); if(tsymEl) tsymEl.value = d.symbol || '24400PE';
+    setGlobalStatus('defaults loaded');
+  }catch(err){
+    setGlobalStatus('failed to load defaults: ' + err);
+  }
+}
+
+function readVal(id){
+  const el = document.getElementById(id);
+  if(!el) return null;
+  const v = (el.value || '').trim();
+  return v === '' ? null : v;
+}
+
+function renderSourceChips(elId, sources){
+  const el = document.getElementById(elId);
+  if(!el) return;
+  if(!sources || !sources.length){ el.textContent = ''; return; }
+  el.innerHTML = 'Sources: ' + sources.map(s => {
+    const ok = s.status === 'loaded';
+    const color = ok ? 'var(--good, #7ee787)' : 'var(--muted, #8b949e)';
+    const detail = ok ? `loaded (${s.rows})` : esc(s.status);
+    const avail = (s.available && s.available.length) ? ` <span style="color:var(--muted,#8b949e)">(try: ${s.available.slice(0,4).map(esc).join(', ')}${s.available.length>4?', …':''})</span>` : '';
+    return `<span style="color:${color}">${esc(s.broker)}: ${detail}</span>${avail}`;
+  }).join(' &nbsp;·&nbsp; ');
+}
+
+function renderTimingSummary(rows){
+  const body = document.getElementById('timing-summary-body');
+  if(!rows || !rows.length){ body.innerHTML = '<tr><td colspan="10">No timing data yet.</td></tr>'; return; }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${esc(r.broker)}</td>
+      <td>${esc(r.rows)}</td>
+      <td>${esc(r.listed_from)}</td>
+      <td>${esc(r.listed_to)}</td>
+      <td>${esc(r.received_from)}</td>
+      <td>${esc(r.received_to)}</td>
+      <td>${esc(fmt(r.median_delay_ms, 3))}</td>
+      <td>${esc(fmt(r.p90_delay_ms, 3))}</td>
+      <td>${esc(fmt(r.max_delay_ms, 3))}</td>
+      <td>${esc(fmt(r.min_delay_ms, 3))}</td>
+    </tr>`).join('');
+}
+
+function renderTimingRows(rows){
+  const body = document.getElementById('timing-rows-body');
+  setExportState('timingRows', readVal('tsym') || readVal('sym') || '', rows || []);
+  setButtonDisabled('timing-download-btn', !(rows && rows.length));
+  if(!rows || !rows.length){ body.innerHTML = '<tr><td colspan="6">No timing rows yet.</td></tr>'; return; }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${esc(r.broker)}</td>
+      <td>${esc(r.symbol)}</td>
+      <td>${esc(r.listed_at_ist)}</td>
+      <td>${esc(r.received_at_ist)}</td>
+      <td>${esc(fmt(r.delay_ms, 3))}</td>
+      <td>${esc(fmt(r.ltp, 4))}</td>
+    </tr>`).join('');
+}
+
+async function runTimingRows(){
+  const status = document.getElementById('timing-sources');
+  status.textContent = 'running timing comparison...';
+  const body = {
+    fyers_csv: readVal('fcsv'),
+    dhan_csv: readVal('dcsv'),
+    nubra_csv: readVal('npar'),
+    xts_csv: readVal('xcsv'),
+    symbol: readVal('tsym') || readVal('sym') || '24400PE',
+    from_ts: readVal('tfrom'),
+    to_ts: readVal('tto'),
+    limit: parseInt((document.getElementById('tlimit').value || '300'), 10) || 300,
+  };
+  const out = await fetchJson('/api/report/receive-rows', body);
+  renderSourceChips('timing-sources', out.sources);
+  const ov = out.overview || {};
+  const cards = [
+    ['Symbol', ov.symbol || ''],
+    ['Brokers Loaded', (ov.brokers_loaded || []).join(', ') || 'none'],
+    ['From', ov.from_ts || ''],
+    ['To', ov.to_ts || ''],
+    ['Rows Total', ov.rows_total || 0],
+    ['Rows Shown', ov.rows_shown || 0],
+  ];
+  const ovEl = document.getElementById('timing-overview');
+  ovEl.innerHTML = (out.rows && out.rows.length) || (out.summary && out.summary.length)
+    ? cards.map(([k,v]) => `<div class="metric"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')
+    : '<div class="empty">No matching rows. Check the symbol, the date range, and that the file paths point at a day with data.</div>';
+  renderTimingSummary(out.summary || []);
+  renderTimingRows(out.rows || []);
+}
+
+async function downloadBrowserMixedXlsx(){
+  const status = document.getElementById('browser-status');
+  const payload = tableExports.browserMixed;
+  if(!payload.rows.length){
+    status.textContent = 'run mixed browser first to download the fetched rows';
+    return;
+  }
+  status.textContent = 'preparing mixed rows xlsx...';
+  try{
+    await downloadXlsx(payload);
+    status.textContent = `downloaded ${payload.rows.length} mixed rows`;
+  }catch(err){
+    status.textContent = err.message || 'mixed rows export failed';
+  }
+}
+
+async function downloadBrowserPairedXlsx(){
+  const status = document.getElementById('browser-status');
+  const payload = tableExports.browserPaired;
+  if(!payload.rows.length){
+    status.textContent = 'run paired compare first to download the fetched rows';
+    return;
+  }
+  status.textContent = 'preparing paired rows xlsx...';
+  try{
+    await downloadXlsx(payload);
+    status.textContent = `downloaded ${payload.rows.length} paired rows`;
+  }catch(err){
+    status.textContent = err.message || 'paired rows export failed';
+  }
+}
+
+async function downloadTimingRowsXlsx(){
+  const status = document.getElementById('timing-sources');
+  const payload = tableExports.timingRows;
+  if(!payload.rows.length){
+    status.textContent = 'run timing comparison first to download the fetched rows';
+    return;
+  }
+  status.textContent = 'preparing timing rows xlsx...';
+  try{
+    await downloadXlsx(payload);
+    renderSourceChips('timing-sources', []);
+    status.textContent = `downloaded ${payload.rows.length} timing rows`;
+  }catch(err){
+    status.textContent = err.message || 'timing rows export failed';
+  }
+}
+
+
+loadDefaults();
+showBrowserMode('mixed');
+</script>
+</body>
+</html>
