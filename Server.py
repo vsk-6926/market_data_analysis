@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import csv
 import io
 from itertools import combinations
+import json
 import math
+import os
 import re
 import sys
 import subprocess
+import time
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
@@ -15,6 +20,11 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
@@ -30,6 +40,36 @@ def _json_safe(value):
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _debug_event(hypothesis_id: str, location: str, msg: str, data: dict | None = None, run_id: str = "pre", session_id: str = "dhan-delay-ui"):
+    env_path = HERE / ".dbg" / f"{session_id}.env"
+    server_url = "http://127.0.0.1:7777/event"
+    active_session_id = session_id
+    try:
+        if env_path.exists():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("DEBUG_SERVER_URL="):
+                    server_url = line.split("=", 1)[1].strip() or server_url
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    active_session_id = line.split("=", 1)[1].strip() or active_session_id
+        payload = {
+            "sessionId": active_session_id,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+            "ts": int(time.time() * 1000),
+        }
+        req = urllib.request.Request(
+            server_url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=0.5).read()
+    except Exception:
+        pass
 
 
 class SafeJSONResponse(JSONResponse):
@@ -52,6 +92,18 @@ def index():
 @app.get("/api/config")
 def config():
     return {"defaults": _default_paths()}
+
+
+@app.post("/api/tools/snapshot-duckdb")
+def create_duckdb_snapshots(r: SnapshotReq):
+    items = {
+        "fyers_csv": _build_duckdb_snapshot(r.fyers_csv),
+        "dhan_csv": _build_duckdb_snapshot(r.dhan_csv),
+        "nubra_csv": _build_duckdb_snapshot(r.nubra_csv),
+        "xts_csv": _build_duckdb_snapshot(r.xts_csv),
+    }
+    created = {key: value["snapshot"] for key, value in items.items() if value and value.get("status") == "created" and value.get("snapshot")}
+    return {"ok": True, "snapshots": items, "created": created}
 
 
 class AnalyzeDirReq(BaseModel):
@@ -161,6 +213,13 @@ class PairedBrowseReq(BaseModel):
     limit: int = 300
 
 
+class SnapshotReq(BaseModel):
+    fyers_csv: str | None = None
+    dhan_csv: str | None = None
+    nubra_csv: str | None = None
+    xts_csv: str | None = None
+
+
 class ExportColumn(BaseModel):
     key: str
     label: str | None = None
@@ -242,6 +301,44 @@ def _resolve_path(path_str: str | None):
     return p
 
 
+def _snapshot_duckdb_path(path: Path):
+    return path.with_suffix(".duckdb")
+
+
+def _snapshot_table_name(path: Path):
+    name = path.name.lower()
+    return "live_1s" if "live_1s" in name else "live_ticks"
+
+
+def _build_duckdb_snapshot(path_str: str | None):
+    path = _resolve_path(path_str)
+    if not path or not path.exists():
+        return None
+    if path.suffix.lower() != ".csv":
+        return {"source": str(path.relative_to(HERE)) if path.is_relative_to(HERE) else str(path), "snapshot": None, "status": "skipped"}
+    if duckdb is None:
+        return {"source": str(path.relative_to(HERE)) if path.is_relative_to(HERE) else str(path), "snapshot": None, "status": "duckdb_missing"}
+    target = _snapshot_duckdb_path(path)
+    table = _snapshot_table_name(path)
+    conn = duckdb.connect(str(target))
+    try:
+        conn.execute(
+            f"CREATE OR REPLACE TABLE {table} AS "
+            f"SELECT * FROM read_csv_auto({_sql_text(str(path))}, header=true, all_varchar=true, ignore_errors=true)"
+        )
+    finally:
+        conn.close()
+    try:
+        src_text = str(path.relative_to(HERE))
+    except ValueError:
+        src_text = str(path)
+    try:
+        snap_text = str(target.relative_to(HERE))
+    except ValueError:
+        snap_text = str(target)
+    return {"source": src_text, "snapshot": snap_text, "status": "created"}
+
+
 def _parse_bound(v: str | None):
     if not v:
         return None
@@ -262,6 +359,97 @@ def _apply_range(df: pd.DataFrame, start: str | None, end: str | None):
     if hi is not None:
         out = out[out["timestamp_ist"] <= hi]
     return out
+
+
+def _csv_columns(path: Path):
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return next(csv.reader(handle), [])
+    except UnicodeDecodeError:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return next(csv.reader(handle), [])
+
+
+def _sql_ident(name: str):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _sql_text(value: str):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _symbol_filter_sql(query: str, columns: list[str], available: set[str]):
+    q = str(query or "").strip().upper()
+    if not q:
+        return None
+    checks = []
+    q_sql = _sql_text(q)
+    for col in columns:
+        if col not in available:
+            continue
+        expr = f"UPPER(COALESCE(CAST({_sql_ident(col)} AS VARCHAR), ''))"
+        checks.append(f"({expr} = {q_sql} OR POSITION({q_sql} IN {expr}) > 0)")
+    if not checks:
+        return None
+    return "(" + " OR ".join(checks) + ")"
+
+
+def _duckdb_sidecar_path(path: Path):
+    m = re.match(r"^((?:fyers|nubra|dhan)_live)_(?:1s|ticks)(.*)\.csv$", path.name, flags=re.IGNORECASE)
+    if not m:
+        return None
+    return path.with_name(f"{m.group(1)}_ticks{m.group(2)}.duckdb")
+
+
+def _duckdb_table_for_path(path: Path):
+    return "live_1s" if "live_1s" in path.name.lower() else "live_ticks"
+
+
+def _duckdb_columns(path: Path):
+    if duckdb is None or path.suffix.lower() != ".duckdb":
+        return set()
+    conn = None
+    try:
+        conn = duckdb.connect(str(path))
+        table = _duckdb_table_for_path(path)
+        rows = conn.execute(f"DESCRIBE {table}").fetchall()
+        return {str(row[0]) for row in rows}
+    except Exception:
+        return set()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _duckdb_project(path: Path, select_exprs: list[tuple[str, str]], where_sql: str | None = None):
+    if duckdb is None:
+        return None
+    conn = None
+    try:
+        if path.suffix.lower() == ".duckdb":
+            conn = duckdb.connect(str(path))
+            source_sql = _duckdb_table_for_path(path)
+        else:
+            sidecar = _duckdb_sidecar_path(path)
+            if sidecar and sidecar.exists():
+                conn = duckdb.connect(str(sidecar))
+                source_sql = _duckdb_table_for_path(path)
+            else:
+                conn = duckdb.connect()
+                source_sql = (
+                    f"read_csv_auto({_sql_text(str(path))}, "
+                    "header=true, all_varchar=true, ignore_errors=true)"
+                )
+        sql = "SELECT " + ", ".join(f"{expr} AS {_sql_ident(alias)}" for alias, expr in select_exprs)
+        sql += f" FROM {source_sql}"
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+        return conn.execute(sql).df()
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _fmt_ts(series: pd.Series):
@@ -296,6 +484,19 @@ def _delay_ms(received: pd.Series, listed: pd.Series):
         return pd.Series([None] * len(listed), index=listed.index if listed is not None else received.index)
     delta = (received - listed).dt.total_seconds() * 1000.0
     return pd.to_numeric(delta, errors="coerce")
+
+
+def _repair_dhan_legacy_times(timestamp_s: pd.Series, listed_s: pd.Series, received_s: pd.Series):
+    timestamp_ist = _to_ist_series(timestamp_s)
+    listed_ist = _to_ist_series(listed_s)
+    received_ist = _to_ist_series(received_s)
+    skew = (listed_ist - received_ist).dt.total_seconds()
+    needs_fix = listed_ist.notna() & received_ist.notna() & (skew > (2 * 3600))
+    if needs_fix.any():
+        shift = pd.Timedelta(hours=5, minutes=30)
+        timestamp_ist = timestamp_ist.where(~needs_fix, timestamp_ist - shift)
+        listed_ist = listed_ist.where(~needs_fix, listed_ist - shift)
+    return timestamp_ist, listed_ist, received_ist
 
 
 def _match_symbol(series: pd.Series, query: str):
@@ -414,7 +615,41 @@ def _load_fyers_rows(path_str: str | None, query: str):
     path = _resolve_path(path_str)
     if not path or not path.exists():
         return pd.DataFrame()
-    df = pd.read_csv(path)
+    headers = set(_csv_columns(path)) if path.suffix.lower() == ".csv" else (_duckdb_columns(path) if path.suffix.lower() == ".duckdb" else set())
+    df = None
+    if path.suffix.lower() in {".csv", ".duckdb"}:
+        symbol_col = "symbol" if "symbol" in headers else ("native_symbol" if "native_symbol" in headers else None)
+        timestamp_col = "datetime" if "datetime" in headers else None
+        if symbol_col and timestamp_col:
+            received_expr = (
+                _sql_ident("received_at_ist") if "received_at_ist" in headers else
+                _sql_ident("last_received_at_ist") if "last_received_at_ist" in headers else
+                _sql_ident("first_received_at_ist") if "first_received_at_ist" in headers else
+                _sql_ident(timestamp_col)
+            )
+            listed_expr = _sql_ident("listed_at_ist") if "listed_at_ist" in headers else _sql_ident(timestamp_col)
+            df = _duckdb_project(
+                path,
+                [
+                    ("symbol", _sql_ident(symbol_col)),
+                    ("datetime", _sql_ident(timestamp_col)),
+                    ("listed_at_ist", listed_expr),
+                    ("received_at_ist", received_expr),
+                    ("ltp", _sql_ident("ltp") if "ltp" in headers else "NULL"),
+                    ("open_price", _sql_ident("open_price") if "open_price" in headers else "NULL"),
+                    ("high_price", _sql_ident("high_price") if "high_price" in headers else "NULL"),
+                    ("low_price", _sql_ident("low_price") if "low_price" in headers else "NULL"),
+                    ("close_price", _sql_ident("close_price") if "close_price" in headers else "NULL"),
+                    ("ask_price", _sql_ident("ask_price") if "ask_price" in headers else "NULL"),
+                    ("bid_price", _sql_ident("bid_price") if "bid_price" in headers else "NULL"),
+                    ("volume", _sql_ident("volume") if "volume" in headers else "NULL"),
+                    ("open_interest", _sql_ident("open_interest") if "open_interest" in headers else "NULL"),
+                    ("message_type", _sql_ident("message_type") if "message_type" in headers else "NULL"),
+                ],
+                _symbol_filter_sql(query, [symbol_col, "canonical_symbol"], headers),
+            )
+    if df is None:
+        df = pd.read_csv(path)
     if df.empty or "symbol" not in df.columns or "datetime" not in df.columns:
         return pd.DataFrame()
     out = df.copy()
@@ -456,7 +691,58 @@ def _load_dhan_rows(path_str: str | None, query: str):
     path = _resolve_path(path_str)
     if not path or not path.exists():
         return pd.DataFrame()
-    df = pd.read_csv(path)
+    # #region debug-point A:dhan-loader-entry
+    _debug_event("A", "Server.py:_load_dhan_rows", "enter dhan loader", {
+        "path": str(path),
+        "query": str(query or ""),
+        "suffix": path.suffix.lower(),
+    })
+    # #endregion
+    headers = set(_csv_columns(path)) if path.suffix.lower() == ".csv" else (_duckdb_columns(path) if path.suffix.lower() == ".duckdb" else set())
+    df = None
+    if path.suffix.lower() in {".csv", ".duckdb"}:
+        native_col = "native_symbol" if "native_symbol" in headers else ("symbol" if "symbol" in headers else None)
+        timestamp_col = "datetime" if "datetime" in headers else ("timestamp" if "timestamp" in headers else None)
+        if native_col and timestamp_col:
+            received_expr = (
+                _sql_ident("received_at_ist") if "received_at_ist" in headers else
+                _sql_ident("last_received_at_ist") if "last_received_at_ist" in headers else
+                _sql_ident("first_received_at_ist") if "first_received_at_ist" in headers else
+                "NULL"
+            )
+            listed_expr = _sql_ident("listed_at_ist") if "listed_at_ist" in headers else _sql_ident(timestamp_col)
+            df = _duckdb_project(
+                path,
+                [
+                    ("native_symbol", _sql_ident(native_col)),
+                    ("canonical_symbol", _sql_ident("canonical_symbol") if "canonical_symbol" in headers else "NULL"),
+                    ("expiry", _sql_ident("expiry") if "expiry" in headers else "NULL"),
+                    ("strike", _sql_ident("strike") if "strike" in headers else "NULL"),
+                    ("instrument_type", _sql_ident("instrument_type") if "instrument_type" in headers else "NULL"),
+                    ("datetime", _sql_ident(timestamp_col)),
+                    ("listed_at_ist", listed_expr),
+                    ("received_at_ist", received_expr),
+                    ("ltp", _sql_ident("ltp") if "ltp" in headers else "NULL"),
+                    ("open_price", _sql_ident("open_price") if "open_price" in headers else (_sql_ident("open") if "open" in headers else "NULL")),
+                    ("high_price", _sql_ident("high_price") if "high_price" in headers else (_sql_ident("high") if "high" in headers else "NULL")),
+                    ("low_price", _sql_ident("low_price") if "low_price" in headers else (_sql_ident("low") if "low" in headers else "NULL")),
+                    ("close_price", _sql_ident("close_price") if "close_price" in headers else (_sql_ident("close") if "close" in headers else "NULL")),
+                    ("ask_price", _sql_ident("ask_price") if "ask_price" in headers else (_sql_ident("ask1_price") if "ask1_price" in headers else "NULL")),
+                    ("bid_price", _sql_ident("bid_price") if "bid_price" in headers else (_sql_ident("bid1_price") if "bid1_price" in headers else "NULL")),
+                    ("volume", _sql_ident("volume") if "volume" in headers else "NULL"),
+                    ("open_interest", _sql_ident("open_interest") if "open_interest" in headers else (_sql_ident("oi") if "oi" in headers else "NULL")),
+                    ("message_type", _sql_ident("message_type") if "message_type" in headers else (_sql_ident("instrument_type") if "instrument_type" in headers else "NULL")),
+                ],
+                _symbol_filter_sql(query, [native_col, "canonical_symbol"], headers),
+            )
+    if df is None:
+        df = pd.read_csv(path)
+    # #region debug-point B:dhan-loader-read
+    _debug_event("B", "Server.py:_load_dhan_rows", "raw dhan frame loaded", {
+        "rows": int(len(df)) if df is not None else -1,
+        "columns": list(df.columns[:20]) if df is not None else [],
+    })
+    # #endregion
     if df.empty:
         return pd.DataFrame()
     out = df.copy()
@@ -474,12 +760,18 @@ def _load_dhan_rows(path_str: str | None, query: str):
     else:
         out["canonical_symbol"] = out["native_symbol"].map(_dhan_to_canonical)
     out = out[_match_symbol(out["canonical_symbol"], query) | _match_symbol(out["native_symbol"], query)]
+    # #region debug-point C:dhan-loader-filter
+    _debug_event("C", "Server.py:_load_dhan_rows", "dhan rows after symbol filter", {
+        "rows": int(len(out)),
+        "sample_native": out["native_symbol"].head(3).astype(str).tolist() if not out.empty else [],
+        "sample_canonical": out["canonical_symbol"].head(3).astype(str).tolist() if not out.empty else [],
+    })
+    # #endregion
     if out.empty:
         return out
     timestamp_col = "datetime" if "datetime" in out.columns else ("timestamp" if "timestamp" in out.columns else None)
     if timestamp_col is None:
         return pd.DataFrame()
-    out["timestamp_ist"] = _to_ist_series(out[timestamp_col])
     listed_col = out["listed_at_ist"] if "listed_at_ist" in out.columns else out[timestamp_col]
     if "received_at_ist" in out.columns:
         received_col = out["received_at_ist"]
@@ -489,9 +781,27 @@ def _load_dhan_rows(path_str: str | None, query: str):
         received_col = out["first_received_at_ist"]
     else:
         received_col = pd.Series([None] * len(out), index=out.index)
-    out["listed_at_ist"] = _to_ist_series(listed_col)
-    out["received_at_ist"] = _to_ist_series(received_col)
+    out["timestamp_ist"], out["listed_at_ist"], out["received_at_ist"] = _repair_dhan_legacy_times(
+        out[timestamp_col],
+        listed_col,
+        received_col,
+    )
     out["receive_delay_ms"] = _delay_ms(out["received_at_ist"], out["listed_at_ist"])
+    if "live_1s" in path.name.lower():
+        tiny_negative = out["receive_delay_ms"].between(-1000, -0.000001, inclusive="both")
+        out.loc[tiny_negative, "receive_delay_ms"] = 0.0
+    # #region debug-point D:dhan-loader-timestamps
+    _debug_event("D", "Server.py:_load_dhan_rows", "dhan timestamp mapping sample", {
+        "timestamp_col": timestamp_col,
+        "has_listed_at_ist": "listed_at_ist" in out.columns,
+        "has_received_at_ist": "received_at_ist" in out.columns,
+        "sample": out[["native_symbol", "timestamp_ist", "listed_at_ist", "received_at_ist", "receive_delay_ms"]]
+        .head(5)
+        .astype(object)
+        .where(pd.notnull(out[["native_symbol", "timestamp_ist", "listed_at_ist", "received_at_ist", "receive_delay_ms"]].head(5)), None)
+        .to_dict(orient="records"),
+    })
+    # #endregion
     out["broker"] = "dhan"
     out["ltp"] = pd.to_numeric(out.get("ltp"), errors="coerce")
     out["o"] = pd.to_numeric(out.get("open_price", out.get("open")), errors="coerce")
@@ -505,15 +815,60 @@ def _load_dhan_rows(path_str: str | None, query: str):
     out["message_type"] = out.get("message_type", out.get("instrument_type"))
     out = out[["broker", "timestamp_ist", "listed_at_ist", "received_at_ist", "receive_delay_ms", "canonical_symbol", "native_symbol", "ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi", "message_type"]]
     metrics = ["ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi"]
-    return out.dropna(subset=metrics, how="all")
+    out = out.dropna(subset=metrics, how="all")
+    if "live_1s" in path.name.lower():
+        out = out.dropna(subset=["ltp"])
+    # #region debug-point E:dhan-loader-output
+    _debug_event("E", "Server.py:_load_dhan_rows", "dhan loader output", {
+        "rows": int(len(out)),
+        "ltp_non_null": int(out["ltp"].notna().sum()) if "ltp" in out.columns else 0,
+        "delay_non_null": int(out["receive_delay_ms"].notna().sum()) if "receive_delay_ms" in out.columns else 0,
+        "delay_negative": int((pd.to_numeric(out["receive_delay_ms"], errors="coerce") < 0).sum()) if "receive_delay_ms" in out.columns else 0,
+    })
+    # #endregion
+    return out
 
 
 def _load_nubra_rows(path_str: str | None, query: str):
     path = _resolve_path(path_str)
     if not path or not path.exists():
         return pd.DataFrame()
+    # #region debug-point A:nubra-loader-entry
+    _debug_event("A", "Server.py:_load_nubra_rows", "enter nubra loader", {
+        "path": str(path),
+        "query": str(query or ""),
+        "suffix": path.suffix.lower(),
+    }, session_id="nubra-ltp-missing")
+    # #endregion
     suffix = path.suffix.lower()
-    if suffix == ".csv":
+    if suffix in {".csv", ".duckdb"} and duckdb is not None:
+        headers = set(_csv_columns(path)) if suffix == ".csv" else _duckdb_columns(path)
+        if "symbol" in headers and "datetime_IST" in headers:
+            df = _duckdb_project(
+                path,
+                [
+                    ("symbol", _sql_ident("symbol")),
+                    ("datetime_IST", _sql_ident("datetime_IST")),
+                    ("listed_at_ist", _sql_ident("listed_at_ist") if "listed_at_ist" in headers else _sql_ident("datetime_IST")),
+                    ("received_at_IST", _sql_ident("received_at_IST") if "received_at_IST" in headers else _sql_ident("datetime_IST")),
+                    ("expiry", _sql_ident("expiry") if "expiry" in headers else "NULL"),
+                    ("strike", _sql_ident("strike") if "strike" in headers else "NULL"),
+                    ("instrument_type", _sql_ident("instrument_type") if "instrument_type" in headers else "NULL"),
+                    ("ltp", _sql_ident("ltp") if "ltp" in headers else "NULL"),
+                    ("open", _sql_ident("open") if "open" in headers else "NULL"),
+                    ("high", _sql_ident("high") if "high" in headers else "NULL"),
+                    ("low", _sql_ident("low") if "low" in headers else "NULL"),
+                    ("close", _sql_ident("close") if "close" in headers else "NULL"),
+                    ("l1ask", _sql_ident("l1ask") if "l1ask" in headers else "NULL"),
+                    ("l1bid", _sql_ident("l1bid") if "l1bid" in headers else "NULL"),
+                    ("cumulative_volume", _sql_ident("cumulative_volume") if "cumulative_volume" in headers else "NULL"),
+                    ("cumulative_oi", _sql_ident("cumulative_oi") if "cumulative_oi" in headers else "NULL"),
+                ],
+                _symbol_filter_sql(query, ["symbol"], headers),
+            )
+        else:
+            df = pd.DataFrame()
+    elif suffix == ".csv":
         df = pd.read_csv(path)
     elif suffix in {".parquet", ".pq"}:
         df = pd.read_parquet(path)
@@ -522,6 +877,12 @@ def _load_nubra_rows(path_str: str | None, query: str):
             df = pd.read_csv(path)
         except Exception:
             df = pd.read_parquet(path)
+    # #region debug-point B:nubra-loader-read
+    _debug_event("B", "Server.py:_load_nubra_rows", "raw nubra frame loaded", {
+        "rows": int(len(df)) if df is not None else -1,
+        "columns": list(df.columns[:25]) if df is not None else [],
+    }, session_id="nubra-ltp-missing")
+    # #endregion
     if df.empty or "symbol" not in df.columns or "datetime_IST" not in df.columns:
         return pd.DataFrame()
     out = df.copy()
@@ -531,6 +892,13 @@ def _load_nubra_rows(path_str: str | None, query: str):
         axis=1,
     )
     out = out[_match_symbol(out["canonical_symbol"], query) | _match_symbol(out["native_symbol"], query)]
+    # #region debug-point C:nubra-loader-filter
+    _debug_event("C", "Server.py:_load_nubra_rows", "nubra rows after symbol filter", {
+        "rows": int(len(out)),
+        "sample_native": out["native_symbol"].head(3).astype(str).tolist() if not out.empty else [],
+        "sample_canonical": out["canonical_symbol"].head(3).astype(str).tolist() if not out.empty else [],
+    }, session_id="nubra-ltp-missing")
+    # #endregion
     if out.empty:
         return out
     out["timestamp_ist"] = _to_ist_series(out["datetime_IST"])
@@ -540,7 +908,9 @@ def _load_nubra_rows(path_str: str | None, query: str):
     out["received_at_ist"] = _to_ist_series(received_col)
     out["receive_delay_ms"] = _delay_ms(out["received_at_ist"], out["listed_at_ist"])
     out["broker"] = "nubra"
-    out["ltp"] = pd.to_numeric(out.get("ltp"), errors="coerce")
+    nubra_ltp = pd.to_numeric(out.get("ltp"), errors="coerce").astype("float64")
+    nubra_close = pd.to_numeric(out.get("close"), errors="coerce").astype("float64")
+    out["ltp"] = nubra_ltp.fillna(nubra_close)
     out["o"] = pd.to_numeric(out.get("open"), errors="coerce")
     out["h"] = pd.to_numeric(out.get("high"), errors="coerce")
     out["l"] = pd.to_numeric(out.get("low"), errors="coerce")
@@ -550,9 +920,29 @@ def _load_nubra_rows(path_str: str | None, query: str):
     out["volume"] = pd.to_numeric(out.get("cumulative_volume"), errors="coerce")
     out["oi"] = pd.to_numeric(out.get("cumulative_oi"), errors="coerce")
     out["message_type"] = out.get("instrument_type")
+    # #region debug-point D:nubra-loader-price-map
+    _debug_event("D", "Server.py:_load_nubra_rows", "nubra price mapping sample", {
+        "has_ltp_col": "ltp" in out.columns,
+        "has_close_col": "close" in out.columns,
+        "sample": out[["native_symbol", "ltp", "o", "h", "l", "c", "receive_delay_ms"]]
+        .head(5)
+        .astype(object)
+        .where(pd.notnull(out[["native_symbol", "ltp", "o", "h", "l", "c", "receive_delay_ms"]].head(5)), None)
+        .to_dict(orient="records"),
+    }, session_id="nubra-ltp-missing")
+    # #endregion
     out = out[["broker", "timestamp_ist", "listed_at_ist", "received_at_ist", "receive_delay_ms", "canonical_symbol", "native_symbol", "ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi", "message_type"]]
     metrics = ["ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi"]
-    return out.dropna(subset=metrics, how="all")
+    out = out.dropna(subset=metrics, how="all")
+    # #region debug-point E:nubra-loader-output
+    _debug_event("E", "Server.py:_load_nubra_rows", "nubra loader output", {
+        "rows": int(len(out)),
+        "ltp_non_null": int(out["ltp"].notna().sum()) if "ltp" in out.columns else 0,
+        "close_non_null": int(out["c"].notna().sum()) if "c" in out.columns else 0,
+        "delay_non_null": int(out["receive_delay_ms"].notna().sum()) if "receive_delay_ms" in out.columns else 0,
+    }, session_id="nubra-ltp-missing")
+    # #endregion
+    return out
 
 
 def _load_xts_rows(path_str: str | None, query: str):
@@ -1305,6 +1695,9 @@ def _second_last_timing(df: pd.DataFrame, broker: str):
     out = df[df["broker"] == broker].dropna(subset=["ltp"]).copy()
     if out.empty:
         return pd.DataFrame(columns=["sec", "ltp", "listed_at_ist", "received_at_ist", "delay_ms"])
+    for col in ("timestamp_ist", "listed_at_ist", "received_at_ist"):
+        if col in out.columns:
+            out[col] = _to_ist_series(out[col])
     out = out.sort_values(["sec", "timestamp_ist"])
     return out.groupby("sec", as_index=False).agg(
         ltp=("ltp", "last"),
@@ -1383,6 +1776,9 @@ def _paired_compare_rows(
     paired["presence"] = paired.apply(_presence, axis=1)
     paired["ltp_diff"] = pd.to_numeric(paired.get("right_ltp"), errors="coerce") - pd.to_numeric(paired.get("left_ltp"), errors="coerce")
     paired["ltp_abs_diff"] = paired["ltp_diff"].abs()
+    for col in ("left_listed_at_ist", "right_listed_at_ist", "left_received_at_ist", "right_received_at_ist"):
+        if col in paired.columns:
+            paired[col] = _to_ist_series(paired[col])
     paired["listed_gap_ms"] = (paired["right_listed_at_ist"] - paired["left_listed_at_ist"]).dt.total_seconds().abs() * 1000.0
     paired["received_gap_ms"] = (paired["right_received_at_ist"] - paired["left_received_at_ist"]).dt.total_seconds().abs() * 1000.0
     paired["delay_gap_ms"] = (pd.to_numeric(paired["right_delay_ms"], errors="coerce") - pd.to_numeric(paired["left_delay_ms"], errors="coerce")).abs()

@@ -16,6 +16,11 @@ from typing import Any
 
 import pyotp
 
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
+
 from nubra_python_sdk.marketdata.market_data import MarketData
 from nubra_python_sdk.refdata.instruments import InstrumentData
 from nubra_python_sdk.start_sdk import InitNubraSdk, NubraEnv
@@ -35,6 +40,7 @@ UNDERLYING = "NIFTY"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
 RAW_TICKS_BASENAME = "nubra_live_ticks"
+TICKS_DUCKDB_BASENAME = "nubra_live_ticks"
 AGG_1S_BASENAME = "nubra_live_1s"
 
 CANONICAL_COLS = [
@@ -70,6 +76,7 @@ def output_paths(out_dir: Path, day: dt.date) -> dict[str, Path]:
     tag = day.isoformat()
     return {
         "raw_csv": out_dir / f"{RAW_TICKS_BASENAME}_{tag}.csv",
+        "raw_duckdb": out_dir / f"{TICKS_DUCKDB_BASENAME}_{tag}.duckdb",
         "agg_csv": out_dir / f"{AGG_1S_BASENAME}_{tag}.csv",
     }
 
@@ -138,14 +145,18 @@ def meta_row(meta: dict[str, Any], **updates: Any) -> dict[str, Any]:
 
 
 class TickStorage:
-    def __init__(self, raw_csv_path: Path, agg_csv_path: Path, interval: str):
+    def __init__(self, raw_csv_path: Path, duckdb_path: Path, agg_csv_path: Path, interval: str):
         self.raw_csv_path = raw_csv_path
+        self.duckdb_path = duckdb_path
         self.agg_csv_path = agg_csv_path
         self.interval = interval
+        self.duckdb_enabled = duckdb is not None
         self.lock = threading.Lock()
         self.pending: dict[str, dict[str, Any]] = {}
         self._init_raw_csv()
         self._init_agg_csv()
+        if self.duckdb_enabled:
+            self._init_duckdb()
 
     def _init_raw_csv(self) -> None:
         if self.raw_csv_path.exists():
@@ -176,6 +187,56 @@ class TickStorage:
             writer = csv.writer(handle)
             writer.writerow(CANONICAL_COLS)
 
+    def _init_duckdb(self) -> None:
+        conn = duckdb.connect(str(self.duckdb_path))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_ticks (
+                datetime_IST VARCHAR,
+                received_at_IST VARCHAR,
+                symbol VARCHAR,
+                ref_id BIGINT,
+                expiry VARCHAR,
+                strike VARCHAR,
+                instrument_type VARCHAR,
+                ltp DOUBLE,
+                l1bid DOUBLE,
+                l1ask DOUBLE,
+                cumulative_volume DOUBLE,
+                open_interest DOUBLE,
+                raw_json VARCHAR
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_1s (
+                datetime_IST VARCHAR,
+                received_at_IST VARCHAR,
+                first_received_at_IST VARCHAR,
+                last_received_at_IST VARCHAR,
+                symbol VARCHAR,
+                expiry VARCHAR,
+                strike VARCHAR,
+                instrument_type VARCHAR,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                l1bid DOUBLE,
+                l1ask DOUBLE,
+                cumulative_volume DOUBLE,
+                cumulative_volume_premium DOUBLE,
+                cumulative_oi DOUBLE,
+                cumulative_volume_delta DOUBLE,
+                theta DOUBLE,
+                delta DOUBLE,
+                gamma DOUBLE,
+                vega DOUBLE,
+                iv_bid DOUBLE,
+                iv_ask DOUBLE,
+                iv_mid DOUBLE
+            )
+        """)
+        conn.close()
+
     def persist(self, tick: dict[str, Any], meta: dict[str, Any]) -> None:
         with self.lock:
             self._write_raw(tick, meta)
@@ -188,23 +249,28 @@ class TickStorage:
             self.pending.clear()
 
     def _write_raw(self, tick: dict[str, Any], meta: dict[str, Any]) -> None:
+        row = [
+            tick["listed_at"].isoformat(),
+            tick["received_at_IST"],
+            meta["symbol"],
+            tick.get("ref_id"),
+            meta["expiry"].isoformat() if hasattr(meta["expiry"], "isoformat") else meta["expiry"],
+            meta["strike"],
+            meta["instrument_type"],
+            tick["ltp"],
+            tick["l1bid"],
+            tick["l1ask"],
+            tick["cumulative_volume"],
+            tick.get("cumulative_oi"),
+            tick["raw_json"],
+        ]
         with self.raw_csv_path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow([
-                tick["listed_at"].isoformat(),
-                tick["received_at_IST"],
-                meta["symbol"],
-                tick.get("ref_id"),
-                meta["expiry"].isoformat() if hasattr(meta["expiry"], "isoformat") else meta["expiry"],
-                meta["strike"],
-                meta["instrument_type"],
-                tick["ltp"],
-                tick["l1bid"],
-                tick["l1ask"],
-                tick["cumulative_volume"],
-                tick.get("cumulative_oi"),
-                tick["raw_json"],
-            ])
+            writer.writerow(row)
+        if self.duckdb_enabled:
+            conn = duckdb.connect(str(self.duckdb_path))
+            conn.execute("INSERT INTO live_ticks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
+            conn.close()
 
     def _update_bucket(self, tick: dict[str, Any], meta: dict[str, Any]) -> None:
         start = bucket_start(tick["listed_at"], self.interval)
@@ -253,9 +319,17 @@ class TickStorage:
         bucket["last_received_at_IST"] = tick["received_at_IST"]
 
     def _flush_bucket(self, row: dict[str, Any]) -> None:
+        out = [row.get(col) for col in CANONICAL_COLS]
         with self.agg_csv_path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow([row.get(col) for col in CANONICAL_COLS])
+            writer.writerow(out)
+        if self.duckdb_enabled:
+            conn = duckdb.connect(str(self.duckdb_path))
+            conn.execute(
+                f"INSERT INTO live_1s VALUES ({', '.join(['?'] * len(CANONICAL_COLS))})",
+                out,
+            )
+            conn.close()
 
 
 def login_client(login_mode: str):
@@ -436,6 +510,7 @@ def main() -> int:
     outputs = output_paths(out_dir, day)
     storage = TickStorage(
         outputs["raw_csv"],
+        outputs["raw_duckdb"],
         outputs["agg_csv"],
         args.interval,
     )
@@ -492,6 +567,8 @@ def main() -> int:
             print(f"\n  saved {outputs['agg_csv']}", flush=True)
         if outputs["raw_csv"].exists():
             print(f"  raw ticks: {outputs['raw_csv']}", flush=True)
+        if outputs["raw_duckdb"].exists():
+            print(f"  duckdb   : {outputs['raw_duckdb']}", flush=True)
         if close_reason["text"]:
             print(f"  final socket status: {close_reason['text']}", flush=True)
     return 0

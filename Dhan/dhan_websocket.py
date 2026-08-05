@@ -21,11 +21,17 @@ from dotenv import dotenv_values
 
 from dhanhq import DhanContext, MarketFeed, dhanhq
 
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
+
 
 BASE_DIR = Path(__file__).resolve().parent
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 UNDERLYING = "NIFTY"
 RAW_TICKS_BASENAME = "dhan_live_ticks"
+TICKS_DUCKDB_BASENAME = "dhan_live_ticks"
 TICKS_1S_BASENAME = "dhan_live_1s"
 SECURITY_MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
 SECURITY_MASTER_FILE = BASE_DIR / "api-scrip-master-detailed.csv"
@@ -118,6 +124,7 @@ def output_paths(out_dir: Path, day: dt.date) -> dict[str, Path]:
     tag = day.isoformat()
     return {
         "raw_csv": out_dir / f"{RAW_TICKS_BASENAME}_{tag}.csv",
+        "raw_duckdb": out_dir / f"{TICKS_DUCKDB_BASENAME}_{tag}.duckdb",
         "agg_csv": out_dir / f"{TICKS_1S_BASENAME}_{tag}.csv",
     }
 
@@ -502,14 +509,18 @@ def bucket_start(ts: dt.datetime, interval: str) -> dt.datetime:
 
 
 class TickStorage:
-    def __init__(self, raw_csv_path: Path, rollup_csv_path: Path, interval: str):
+    def __init__(self, raw_csv_path: Path, duckdb_path: Path, rollup_csv_path: Path, interval: str):
         self.raw_csv_path = raw_csv_path
+        self.duckdb_path = duckdb_path
         self.rollup_csv_path = rollup_csv_path
         self.interval = interval
+        self.duckdb_enabled = duckdb is not None
         self.lock = threading.Lock()
         self.pending: dict[str, dict[str, Any]] = {}
         self._init_csv(self.raw_csv_path, RAW_COLUMNS)
         self._init_csv(self.rollup_csv_path, ROLLUP_COLUMNS)
+        if self.duckdb_enabled:
+            self._init_duckdb()
 
     def _init_csv(self, path: Path, header: list[str]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -517,6 +528,78 @@ class TickStorage:
             return
         with path.open("w", newline="", encoding="utf-8") as handle:
             csv.writer(handle).writerow(header)
+
+    def _init_duckdb(self) -> None:
+        conn = duckdb.connect(str(self.duckdb_path))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_ticks (
+                date VARCHAR,
+                datetime VARCHAR,
+                listed_at_ist VARCHAR,
+                received_at_ist VARCHAR,
+                security_id VARCHAR,
+                exchange_segment VARCHAR,
+                symbol VARCHAR,
+                native_symbol VARCHAR,
+                canonical_symbol VARCHAR,
+                underlying VARCHAR,
+                expiry VARCHAR,
+                strike VARCHAR,
+                instrument_type VARCHAR,
+                ltp DOUBLE,
+                ltq BIGINT,
+                avg_price DOUBLE,
+                volume BIGINT,
+                total_sell_quantity BIGINT,
+                total_buy_quantity BIGINT,
+                open_interest BIGINT,
+                oi_day_high BIGINT,
+                oi_day_low BIGINT,
+                open_price DOUBLE,
+                high_price DOUBLE,
+                low_price DOUBLE,
+                close_price DOUBLE,
+                bid_price DOUBLE,
+                ask_price DOUBLE,
+                bid_qty BIGINT,
+                ask_qty BIGINT,
+                bid_orders BIGINT,
+                ask_orders BIGINT,
+                message_type VARCHAR,
+                raw_json VARCHAR
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_1s (
+                date VARCHAR,
+                datetime VARCHAR,
+                listed_at_ist VARCHAR,
+                first_received_at_ist VARCHAR,
+                last_received_at_ist VARCHAR,
+                security_id VARCHAR,
+                exchange_segment VARCHAR,
+                symbol VARCHAR,
+                native_symbol VARCHAR,
+                canonical_symbol VARCHAR,
+                underlying VARCHAR,
+                expiry VARCHAR,
+                strike VARCHAR,
+                instrument_type VARCHAR,
+                ltp DOUBLE,
+                open_price DOUBLE,
+                high_price DOUBLE,
+                low_price DOUBLE,
+                close_price DOUBLE,
+                volume BIGINT,
+                bid_price DOUBLE,
+                ask_price DOUBLE,
+                bid_qty BIGINT,
+                ask_qty BIGINT,
+                open_interest BIGINT,
+                message_type VARCHAR
+            )
+        """)
+        conn.close()
 
     def persist(self, tick: dict[str, Any]) -> None:
         with self.lock:
@@ -530,8 +613,16 @@ class TickStorage:
             self.pending.clear()
 
     def _append_raw(self, tick: dict[str, Any]) -> None:
+        row = [tick.get(col) for col in RAW_COLUMNS]
         with self.raw_csv_path.open("a", newline="", encoding="utf-8") as handle:
-            csv.writer(handle).writerow([tick.get(col) for col in RAW_COLUMNS])
+            csv.writer(handle).writerow(row)
+        if self.duckdb_enabled:
+            conn = duckdb.connect(str(self.duckdb_path))
+            conn.execute(
+                f"INSERT INTO live_ticks VALUES ({', '.join(['?'] * len(RAW_COLUMNS))})",
+                row,
+            )
+            conn.close()
 
     def _update_rollup(self, tick: dict[str, Any]) -> None:
         listed_at = dt.datetime.fromisoformat(str(tick["listed_at_ist"]))
@@ -543,6 +634,9 @@ class TickStorage:
             bucket = None
 
         ltp = _safe_float(tick.get("ltp"))
+        if bucket is None and ltp is None:
+            # Ignore OI-only / non-price packets as standalone 1s rows.
+            return
         if bucket is None:
             bucket = {
                 "date": bucket_dt.date().isoformat(),
@@ -593,15 +687,27 @@ class TickStorage:
             bucket["last_received_at_ist"] = tick["received_at_ist"]
 
     def _append_rollup(self, row: dict[str, Any]) -> None:
+        out = [row.get(col) for col in ROLLUP_COLUMNS]
         with self.rollup_csv_path.open("a", newline="", encoding="utf-8") as handle:
-            csv.writer(handle).writerow([row.get(col) for col in ROLLUP_COLUMNS])
+            csv.writer(handle).writerow(out)
+        if self.duckdb_enabled:
+            conn = duckdb.connect(str(self.duckdb_path))
+            conn.execute(
+                f"INSERT INTO live_1s VALUES ({', '.join(['?'] * len(ROLLUP_COLUMNS))})",
+                out,
+            )
+            conn.close()
 
 
 def listed_timestamp_ist(message: dict[str, Any], fallback: dt.datetime) -> dt.datetime:
     epoch = _safe_int(message.get("LTT_epoch"))
     if epoch is None or epoch <= 0:
         return fallback
-    return dt.datetime.fromtimestamp(epoch, tz=dt.timezone.utc).astimezone(IST)
+    utc_based = dt.datetime.fromtimestamp(epoch, tz=dt.timezone.utc).astimezone(IST)
+    ist_epoch_based = dt.datetime(1970, 1, 1, tzinfo=IST) + dt.timedelta(seconds=epoch)
+    utc_gap = abs((utc_based - fallback).total_seconds())
+    ist_gap = abs((ist_epoch_based - fallback).total_seconds())
+    return ist_epoch_based if ist_gap < utc_gap else utc_based
 
 
 def normalize_tick(message: dict[str, Any], meta_by_security: dict[str, dict[str, Any]], received_at: dt.datetime) -> dict[str, Any] | None:
@@ -657,6 +763,16 @@ def normalize_tick(message: dict[str, Any], meta_by_security: dict[str, dict[str
 def parse_until(value: str) -> tuple[int, int]:
     hh, mm = str(value).split(":", 1)
     return int(hh), int(mm)
+
+
+def reconnect_sleep_seconds(exc: Exception, consecutive_failures: int) -> int:
+    message = str(exc).lower()
+    if "http 429" in message or "too many requests" in message:
+        # Dhan rejects burst reconnects for a while after rate limiting.
+        steps = [30, 60, 120, 180, 300]
+        idx = min(max(consecutive_failures - 1, 0), len(steps) - 1)
+        return steps[idx]
+    return min(30, max(3, consecutive_failures * 3))
 
 
 def print_universe(universe_info: dict[str, Any], meta_by_security: dict[str, dict[str, Any]]) -> None:
@@ -718,10 +834,11 @@ def main() -> int:
     day = now_ist().date()
     wait_for_market_open(day)
     outputs = output_paths(out_dir, day)
-    storage = TickStorage(outputs["raw_csv"], outputs["agg_csv"], args.interval)
+    storage = TickStorage(outputs["raw_csv"], outputs["raw_duckdb"], outputs["agg_csv"], args.interval)
     stop_h, stop_m = parse_until(args.until)
     should_stop = {"value": False}
     feed_holder = {"feed": None}
+    consecutive_failures = 0
 
     def shutdown(signum=None, frame=None):
         should_stop["value"] = True
@@ -748,6 +865,7 @@ def main() -> int:
             feed_holder["feed"] = feed
             print("  connecting Dhan market feed...", flush=True)
             feed.run_forever()
+            consecutive_failures = 0
             print("  Dhan market feed connected.", flush=True)
             while not should_stop["value"]:
                 current = now_ist()
@@ -758,12 +876,17 @@ def main() -> int:
                 received_at = now_ist()
                 tick = normalize_tick(message, meta_by_security, received_at)
                 if tick is not None:
+                    consecutive_failures = 0
                     storage.persist(tick)
         except KeyboardInterrupt:
             should_stop["value"] = True
         except Exception as exc:
+            consecutive_failures += 1
+            sleep_for = reconnect_sleep_seconds(exc, consecutive_failures)
             print(f"  Dhan websocket error: {exc}", flush=True)
-            time.sleep(3)
+            if not should_stop["value"]:
+                print(f"  retrying Dhan websocket in {sleep_for}s...", flush=True)
+                time.sleep(sleep_for)
         finally:
             feed = feed_holder.get("feed")
             if feed is not None:
@@ -778,6 +901,8 @@ def main() -> int:
         print(f"\n  saved {outputs['agg_csv']}", flush=True)
     if outputs["raw_csv"].exists():
         print(f"  raw ticks: {outputs['raw_csv']}", flush=True)
+    if outputs["raw_duckdb"].exists():
+        print(f"  duckdb   : {outputs['raw_duckdb']}", flush=True)
     return 0
 
 

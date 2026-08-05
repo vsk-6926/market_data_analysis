@@ -172,6 +172,11 @@
     <div class="row" style="margin-top:14px">
       <button onclick="runDecision()">Run Decision Comparison</button>
       <button class="secondary" onclick="loadDefaults()">Reload Defaults</button>
+      <button class="secondary" onclick="createDuckdbSnapshots()">Create DuckDB Snapshots</button>
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 2px;color:var(--text)">
+        <input id="use-duckdb" type="checkbox" onchange="applyDuckdbToggle()" style="width:auto;padding:0">
+        Use DuckDB Snapshot
+      </label>
     </div>
     <div class="hint">`FYERS`, `Dhan`, `Nubra`, or `GDFL` reference = second-by-second feed comparison. `AlphaBot` reference = compare which feed is closer to your actual entry/exit timestamps and prices. `XTS` is currently used in the receive-time comparison and row browser sections.</div>
     <div class="status" id="global-status"></div>
@@ -913,6 +918,7 @@ function renderBrowserRows(rows){
 }
 
 let browserMode = 'mixed';
+const snapshotInputIds = ['fcsv', 'dcsv', 'npar', 'xcsv'];
 
 function setBrowserButtons(){
   const mixed = document.getElementById('browser-mixed-btn');
@@ -928,6 +934,68 @@ function showBrowserMode(mode){
   if(mixedCard) mixedCard.style.display = browserMode === 'mixed' ? '' : 'none';
   if(pairedCard) pairedCard.style.display = browserMode === 'paired' ? '' : 'none';
   setBrowserButtons();
+}
+
+function snapshotPathFor(value){
+  const v = (value || '').trim();
+  return /\.csv$/i.test(v) ? v.replace(/\.csv$/i, '.duckdb') : v;
+}
+
+function setCsvBaseline(id, value){
+  const el = document.getElementById(id);
+  if(!el) return;
+  const v = (value || '').trim();
+  if(/\.csv$/i.test(v)) el.dataset.csvPath = v;
+}
+
+function readCsvBaseline(id){
+  const el = document.getElementById(id);
+  if(!el) return null;
+  const v = (el.dataset.csvPath || '').trim();
+  return v || null;
+}
+
+function applyDuckdbToggle(){
+  const enabled = !!document.getElementById('use-duckdb')?.checked;
+  snapshotInputIds.forEach(id => {
+    const el = document.getElementById(id);
+    if(!el) return;
+    const baseline = readCsvBaseline(id) || (!/\.duckdb$/i.test(el.value || '') ? (el.value || '').trim() : '');
+    if(enabled){
+      if(baseline) el.value = snapshotPathFor(baseline);
+    }else{
+      const original = readCsvBaseline(id);
+      if(original) el.value = original;
+    }
+  });
+}
+
+async function createDuckdbSnapshots(){
+  setGlobalStatus('creating duckdb snapshots...');
+  try{
+    const body = {
+      fyers_csv: readCsvBaseline('fcsv') || readVal('fcsv'),
+      dhan_csv: readCsvBaseline('dcsv') || readVal('dcsv'),
+      nubra_csv: readCsvBaseline('npar') || readVal('npar'),
+      xts_csv: readCsvBaseline('xcsv') || readVal('xcsv'),
+    };
+    const out = await fetchJson('/api/tools/snapshot-duckdb', body);
+    const created = out.created || {};
+    if(body.fyers_csv) setCsvBaseline('fcsv', body.fyers_csv);
+    if(body.dhan_csv) setCsvBaseline('dcsv', body.dhan_csv);
+    if(body.nubra_csv) setCsvBaseline('npar', body.nubra_csv);
+    if(body.xts_csv) setCsvBaseline('xcsv', body.xts_csv);
+    if(document.getElementById('use-duckdb')?.checked){
+      if(created.fyers_csv) document.getElementById('fcsv').value = created.fyers_csv;
+      if(created.dhan_csv) document.getElementById('dcsv').value = created.dhan_csv;
+      if(created.nubra_csv) document.getElementById('npar').value = created.nubra_csv;
+      if(created.xts_csv) document.getElementById('xcsv').value = created.xts_csv;
+    }
+    const done = Object.values(created).filter(Boolean);
+    setGlobalStatus(done.length ? `duckdb snapshots ready: ${done.join(', ')}` : 'no csv snapshots were created');
+  }catch(err){
+    setGlobalStatus('snapshot creation failed: ' + err);
+  }
 }
 
 function renderPairedRows(out){
@@ -1237,6 +1305,11 @@ async function loadDefaults(){
     document.getElementById('sym').value = d.symbol || '24400PE';
     document.getElementById('bsym').value = d.symbol || '24400PE';
     const tsymEl = document.getElementById('tsym'); if(tsymEl) tsymEl.value = d.symbol || '24400PE';
+    setCsvBaseline('fcsv', d.fyers_csv || '');
+    setCsvBaseline('dcsv', d.dhan_csv || '');
+    setCsvBaseline('npar', d.nubra_csv || d.nubra_parquet || '');
+    setCsvBaseline('xcsv', d.xts_csv || '');
+    applyDuckdbToggle();
     setGlobalStatus('defaults loaded');
   }catch(err){
     setGlobalStatus('failed to load defaults: ' + err);

@@ -1,5 +1,6 @@
 # Environments
 .env
+*.env
 _env
 .venv
 env/
@@ -28,11 +29,18 @@ logs/
 /auth_data.db.db
 access_token.json
 access_token.txt
-FYERS/fyers_live_1s_*.csv
-FYERS/fyers_live_ticks_*.csv
-NUBRA/nubra_*.csv
+FYERS/*.csv
+FYERS/*.duckdb
+NUBRA/*.csv
 NUBRA/*.parquet
+NUBRA/*.duckdb
+Dhan/*.csv
+Dhan/*.duckdb
 NSE_FO.csv
 XTS/*.csv
 alphabot*.csv
 *.parquet
+.debug/
+trae*
+*.md
+dhan_auth_probe.py
