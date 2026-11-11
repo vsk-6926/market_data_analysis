@@ -66,3 +66,6 @@ Alphabots/feed.token
 Alphabots/refdata/
 Alphabots/*.csv
 Alphabots/*.duckdb
+
+# Raw Dhan expired-options pull (shared as datasets/ split zip instead)
+Dhan/expired_data/
