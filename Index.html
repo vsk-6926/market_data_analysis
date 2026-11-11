@@ -135,6 +135,18 @@
         <input id="xcsv" placeholder="XTS/xts_live_1s_YYYY-MM-DD.csv">
       </div>
       <div>
+        <label for="acsv">Arrow CSV (ds)</label>
+        <input id="acsv" placeholder="Arrow/arrow_live_1s_YYYY-MM-DD.csv">
+      </div>
+      <div>
+        <label for="ahcsv">Arrow CSV (HFT)</label>
+        <input id="ahcsv" placeholder="Arrow/arrow_hft_live_1s_YYYY-MM-DD.csv">
+      </div>
+      <div>
+        <label for="qcsv">Quantick CSV</label>
+        <input id="qcsv" placeholder="Quantick/quantick_live_1s_YYYY-MM-DD.csv">
+      </div>
+      <div>
         <label for="alphacsv">AlphaBot CSV</label>
         <input id="alphacsv" placeholder="alphabot_data.csv">
       </div>
@@ -145,6 +157,9 @@
           <option value="dhan">Dhan</option>
           <option value="nubra">Nubra</option>
           <option value="gdfl">GDFL</option>
+          <option value="arrow">Arrow (ds)</option>
+            <option value="arrow_hft">Arrow (HFT)</option>
+            <option value="quantick">Quantick</option>
           <option value="alphabot">AlphaBot</option>
         </select>
       </div>
@@ -178,7 +193,7 @@
         Use DuckDB Snapshot
       </label>
     </div>
-    <div class="hint">`FYERS`, `Dhan`, `Nubra`, or `GDFL` reference = second-by-second feed comparison. `AlphaBot` reference = compare which feed is closer to your actual entry/exit timestamps and prices. `XTS` is currently used in the receive-time comparison and row browser sections.</div>
+    <div class="hint">`FYERS`, `Dhan`, `Nubra`, `GDFL`, or `Arrow` reference = second-by-second feed comparison. `AlphaBot` reference = compare which feed is closer to your actual entry/exit timestamps and prices. `XTS` is currently used in the receive-time comparison and row browser sections.</div>
     <div class="status" id="global-status"></div>
   </div>
 
@@ -383,6 +398,9 @@
             <option value="fyers" selected>FYERS</option>
             <option value="dhan">Dhan</option>
             <option value="nubra">Nubra</option>
+            <option value="arrow">Arrow (ds)</option>
+            <option value="arrow_hft">Arrow (HFT)</option>
+            <option value="quantick">Quantick</option>
           </select>
         </div>
         <div style="flex:1 1 150px">
@@ -391,6 +409,9 @@
             <option value="fyers">FYERS</option>
             <option value="dhan">Dhan</option>
             <option value="nubra" selected>Nubra</option>
+            <option value="arrow">Arrow (ds)</option>
+            <option value="arrow_hft">Arrow (HFT)</option>
+            <option value="quantick">Quantick</option>
           </select>
         </div>
         <div style="flex:1 1 240px">
@@ -487,7 +508,7 @@
 
   <div id="tab-timing" class="tab">
     <div class="card">
-      <div class="small" style="margin-bottom:10px">For every captured tick this compares the <b>exchange (listed) timestamp the feed stamped</b> with the <b>local IST time your system actually received it</b>. Delay = received &minus; listed. Uses the FYERS / Nubra / XTS paths from the form at the top &mdash; leave a path blank to exclude that feed.</div>
+      <div class="small" style="margin-bottom:10px">For every captured tick this compares the <b>exchange (listed) timestamp the feed stamped</b> with the <b>local IST time your system actually received it</b>. Delay = received &minus; listed. Uses the FYERS / Dhan / Nubra / XTS / Arrow paths from the form at the top &mdash; leave a path blank to exclude that feed.</div>
       <div class="row">
         <div style="flex:1 1 240px">
           <label for="tsym">Symbol</label>
@@ -683,6 +704,9 @@ function brokerLabel(v){
   if(key === 'fyers') return 'FYERS';
   if(key === 'dhan') return 'Dhan';
   if(key === 'nubra') return 'Nubra';
+  if(key === 'arrow') return 'Arrow (ds)';
+  if(key === 'arrow_hft') return 'Arrow (HFT)';
+  if(key === 'quantick') return 'Quantick';
   return key ? key.charAt(0).toUpperCase() + key.slice(1) : '';
 }
 
@@ -918,7 +942,7 @@ function renderBrowserRows(rows){
 }
 
 let browserMode = 'mixed';
-const snapshotInputIds = ['fcsv', 'dcsv', 'npar', 'xcsv'];
+const snapshotInputIds = ['fcsv', 'dcsv', 'npar', 'xcsv', 'acsv', 'ahcsv', 'qcsv'];
 
 function setBrowserButtons(){
   const mixed = document.getElementById('browser-mixed-btn');
@@ -978,6 +1002,9 @@ async function createDuckdbSnapshots(){
       dhan_csv: readCsvBaseline('dcsv') || readVal('dcsv'),
       nubra_csv: readCsvBaseline('npar') || readVal('npar'),
       xts_csv: readCsvBaseline('xcsv') || readVal('xcsv'),
+      arrow_csv: readCsvBaseline('acsv') || readVal('acsv'),
+      arrow_hft_csv: readCsvBaseline('ahcsv') || readVal('ahcsv'),
+      quantick_csv: readCsvBaseline('qcsv') || readVal('qcsv'),
     };
     const out = await fetchJson('/api/tools/snapshot-duckdb', body);
     const created = out.created || {};
@@ -985,11 +1012,17 @@ async function createDuckdbSnapshots(){
     if(body.dhan_csv) setCsvBaseline('dcsv', body.dhan_csv);
     if(body.nubra_csv) setCsvBaseline('npar', body.nubra_csv);
     if(body.xts_csv) setCsvBaseline('xcsv', body.xts_csv);
+    if(body.arrow_csv) setCsvBaseline('acsv', body.arrow_csv);
+    if(body.arrow_hft_csv) setCsvBaseline('ahcsv', body.arrow_hft_csv);
+    if(body.quantick_csv) setCsvBaseline('qcsv', body.quantick_csv);
     if(document.getElementById('use-duckdb')?.checked){
       if(created.fyers_csv) document.getElementById('fcsv').value = created.fyers_csv;
       if(created.dhan_csv) document.getElementById('dcsv').value = created.dhan_csv;
       if(created.nubra_csv) document.getElementById('npar').value = created.nubra_csv;
       if(created.xts_csv) document.getElementById('xcsv').value = created.xts_csv;
+      if(created.arrow_csv) document.getElementById('acsv').value = created.arrow_csv;
+      if(created.arrow_hft_csv) document.getElementById('ahcsv').value = created.arrow_hft_csv;
+      if(created.quantick_csv) document.getElementById('qcsv').value = created.quantick_csv;
     }
     const done = Object.values(created).filter(Boolean);
     setGlobalStatus(done.length ? `duckdb snapshots ready: ${done.join(', ')}` : 'no csv snapshots were created');
@@ -1140,6 +1173,9 @@ function decisionBody(){
     nubra_csv: (document.getElementById('npar').value || '').trim() || null,
     gdfl_parquet: (document.getElementById('gpar').value || '').trim() || null,
     xts_csv: (document.getElementById('xcsv').value || '').trim() || null,
+    arrow_csv: (document.getElementById('acsv').value || '').trim() || null,
+    arrow_hft_csv: (document.getElementById('ahcsv').value || '').trim() || null,
+    quantick_csv: (document.getElementById('qcsv').value || '').trim() || null,
     alpha_csv: (document.getElementById('alphacsv').value || '').trim() || null,
     symbol: (document.getElementById('sym').value || '').trim() || '24400PE',
     from_ts: (document.getElementById('fromts').value || '').trim() || null,
@@ -1156,6 +1192,9 @@ async function runReceiveCompare(){
     dhan_csv: (document.getElementById('dcsv').value || '').trim() || null,
     nubra_csv: (document.getElementById('npar').value || '').trim() || null,
     xts_csv: (document.getElementById('xcsv').value || '').trim() || null,
+    arrow_csv: (document.getElementById('acsv').value || '').trim() || null,
+    arrow_hft_csv: (document.getElementById('ahcsv').value || '').trim() || null,
+    quantick_csv: (document.getElementById('qcsv').value || '').trim() || null,
     symbol: (document.getElementById('sym').value || '').trim() || '24400PE',
     from_ts: (document.getElementById('fromts').value || '').trim() || null,
     to_ts: (document.getElementById('tots').value || '').trim() || null,
@@ -1234,6 +1273,9 @@ async function browseRows(){
     nubra_csv: (document.getElementById('npar').value || '').trim() || null,
     gdfl_parquet: (document.getElementById('gpar').value || '').trim() || null,
     xts_csv: (document.getElementById('xcsv').value || '').trim() || null,
+    arrow_csv: (document.getElementById('acsv').value || '').trim() || null,
+    arrow_hft_csv: (document.getElementById('ahcsv').value || '').trim() || null,
+    quantick_csv: (document.getElementById('qcsv').value || '').trim() || null,
     symbol: (document.getElementById('bsym').value || '').trim() || (document.getElementById('sym').value || '').trim(),
     from_ts: (document.getElementById('bfrom').value || '').trim() || null,
     to_ts: (document.getElementById('bto').value || '').trim() || null,
@@ -1263,6 +1305,9 @@ async function browsePaired(){
     fyers_csv: readVal('fcsv'),
     dhan_csv: readVal('dcsv'),
     nubra_csv: readVal('npar'),
+    arrow_csv: readVal('acsv'),
+    arrow_hft_csv: readVal('ahcsv'),
+    quantick_csv: readVal('qcsv'),
     left_broker: readVal('pair-left') || 'fyers',
     right_broker: readVal('pair-right') || 'nubra',
     symbol: readVal('bsym') || readVal('sym'),
@@ -1301,6 +1346,9 @@ async function loadDefaults(){
     document.getElementById('npar').value = d.nubra_csv || d.nubra_parquet || '';
     document.getElementById('gpar').value = d.gdfl_parquet || '';
     document.getElementById('xcsv').value = d.xts_csv || '';
+    document.getElementById('acsv').value = d.arrow_csv || '';
+    document.getElementById('ahcsv').value = d.arrow_hft_csv || '';
+    document.getElementById('qcsv').value = d.quantick_csv || '';
     document.getElementById('alphacsv').value = d.alphabot_csv || '';
     document.getElementById('sym').value = d.symbol || '24400PE';
     document.getElementById('bsym').value = d.symbol || '24400PE';
@@ -1309,6 +1357,9 @@ async function loadDefaults(){
     setCsvBaseline('dcsv', d.dhan_csv || '');
     setCsvBaseline('npar', d.nubra_csv || d.nubra_parquet || '');
     setCsvBaseline('xcsv', d.xts_csv || '');
+    setCsvBaseline('acsv', d.arrow_csv || '');
+    setCsvBaseline('ahcsv', d.arrow_hft_csv || '');
+    setCsvBaseline('qcsv', d.quantick_csv || '');
     applyDuckdbToggle();
     setGlobalStatus('defaults loaded');
   }catch(err){
@@ -1378,6 +1429,9 @@ async function runTimingRows(){
     dhan_csv: readVal('dcsv'),
     nubra_csv: readVal('npar'),
     xts_csv: readVal('xcsv'),
+    arrow_csv: readVal('acsv'),
+    arrow_hft_csv: readVal('ahcsv'),
+    quantick_csv: readVal('qcsv'),
     symbol: readVal('tsym') || readVal('sym') || '24400PE',
     from_ts: readVal('tfrom'),
     to_ts: readVal('tto'),

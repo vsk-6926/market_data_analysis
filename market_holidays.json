@@ -1,0 +1,28 @@
+{
+  "holidays": {
+    "01-05-2026": "Maharashtra Day",
+    "02-10-2026": "Mahatma Gandhi Jayanti",
+    "03-03-2026": "Holi",
+    "03-04-2026": "Good Friday",
+    "10-11-2026": "Diwali-Balipratipada",
+    "14-04-2026": "Dr. Baba Saheb Ambedkar Jayanti",
+    "14-09-2026": "Ganesh Chaturthi",
+    "15-01-2026": "Municipal Corporation Election in Maharashtra",
+    "20-10-2026": "Dussehra",
+    "24-11-2026": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "25-12-2026": "Christmas",
+    "26-01-2026": "Republic Day",
+    "26-03-2026": "Shri Ram Navami",
+    "26-06-2026": "Muharram",
+    "28-05-2026": "Bakri Id",
+    "31-03-2026": "Shri Mahavir Jayanti"
+  },
+  "specialTradingDays": {
+    "01-02-2025": [
+      [
+        "09:00",
+        400
+      ]
+    ]
+  }
+}

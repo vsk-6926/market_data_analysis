@@ -1,0 +1,26 @@
+ALPHABOTS live prices - what to run (keep alphabots_feed.py and feed_cert.pem in the same folder)
+
+1. Python 3.9+ and two packages:
+       Windows:   py -m pip install numpy websockets
+       Linux/Mac: pip3 install numpy websockets
+
+2. Save the token you were given as ONE line in a file called feed.token in that folder (no quotes, no spaces).
+   Windows PowerShell:  Set-Content -Path .\feed.token -Value 'PASTE_TOKEN_HERE' -NoNewline -Encoding ascii
+
+3. Check: the day's instruments (connects, prints the list, exits)
+       Windows:   py .\alphabots_feed.py --token-file .\feed.token --list
+       Linux/Mac: python3 alphabots_feed.py --token-file feed.token --list
+
+4. Live prices: one JSON line per tick and per finished 1-minute bar, until Ctrl-C
+       Windows:   py .\alphabots_feed.py --token-file .\feed.token
+       Linux/Mac: python3 alphabots_feed.py --token-file feed.token
+
+   Useful additions:   --underlying NIFTY        only NIFTY contracts
+                       --csv-dir .\data          also CSV files per day
+                       --watch                   live price table instead of JSON lines
+                       --out .\ticks.jsonl       write the JSON lines to a file
+                       --log-file .\feed.log     log to a file instead of the screen
+   Full help:  py .\alphabots_feed.py --help      (Python API: see the docstring at the top of the file)
+
+Send the operator your public IP (Windows: (Invoke-WebRequest https://checkip.amazonaws.com).Content ; Linux: curl https://checkip.amazonaws.com)
+so it can be allowed on the firewall. Start before 09:15 IST; the program reconnects by itself.

@@ -145,18 +145,54 @@ def meta_row(meta: dict[str, Any], **updates: Any) -> dict[str, Any]:
 
 
 class TickStorage:
-    def __init__(self, raw_csv_path: Path, duckdb_path: Path, agg_csv_path: Path, interval: str):
+    """Buffered writer.
+
+    The old version opened the CSV and a fresh duckdb connection for every tick,
+    which tops out around 50 ticks/s; a full option chain is ~500/s, so on
+    2026-10-16 the capture ran 3-10 minutes behind the market. Handles now stay
+    open and duckdb rows go in batches, flushed every FLUSH_SECONDS / FLUSH_ROWS.
+    """
+
+    FLUSH_ROWS = 1000
+    FLUSH_SECONDS = 2.0
+
+    def __init__(self, raw_csv_path: Path, duckdb_path: Path, agg_csv_path: Path, interval: str,
+                 duckdb_enabled: bool = True):
         self.raw_csv_path = raw_csv_path
         self.duckdb_path = duckdb_path
         self.agg_csv_path = agg_csv_path
         self.interval = interval
-        self.duckdb_enabled = duckdb is not None
+        self.duckdb_enabled = duckdb is not None and duckdb_enabled
         self.lock = threading.Lock()
         self.pending: dict[str, dict[str, Any]] = {}
+        self.tick_count = 0
         self._init_raw_csv()
         self._init_agg_csv()
         if self.duckdb_enabled:
             self._init_duckdb()
+        self._raw_handle = self.raw_csv_path.open("a", newline="", encoding="utf-8")
+        self._raw_writer = csv.writer(self._raw_handle)
+        self._agg_handle = self.agg_csv_path.open("a", newline="", encoding="utf-8")
+        self._agg_writer = csv.writer(self._agg_handle)
+        self._raw_buffer: list[list[Any]] = []
+        self._agg_buffer: list[list[Any]] = []
+        self._last_flush = time.time()
+        self._conn = duckdb.connect(str(self.duckdb_path)) if self.duckdb_enabled else None
+
+    def _flush(self) -> None:
+        """Caller holds self.lock."""
+        self._raw_handle.flush()
+        self._agg_handle.flush()
+        if self._conn is not None:
+            for table, buf in (("live_ticks", self._raw_buffer), ("live_1s", self._agg_buffer)):
+                if buf:
+                    try:
+                        self._conn.executemany(f"INSERT INTO {table} VALUES ({', '.join(['?'] * len(buf[0]))})", buf)
+                    except Exception as exc:
+                        print(f"  warning: duckdb insert failed ({exc}); CSV still complete.", flush=True)
+        self._raw_buffer.clear()
+        self._agg_buffer.clear()
+        self._last_flush = time.time()
 
     def _init_raw_csv(self) -> None:
         if self.raw_csv_path.exists():
@@ -241,12 +277,24 @@ class TickStorage:
         with self.lock:
             self._write_raw(tick, meta)
             self._update_bucket(tick, meta)
+            self.tick_count += 1
+            if len(self._raw_buffer) >= self.FLUSH_ROWS or time.time() - self._last_flush >= self.FLUSH_SECONDS:
+                self._flush()
 
     def close(self) -> None:
         with self.lock:
             for symbol in sorted(self.pending):
                 self._flush_bucket(self.pending[symbol])
             self.pending.clear()
+            self._flush()
+            for handle in (self._raw_handle, self._agg_handle):
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def _write_raw(self, tick: dict[str, Any], meta: dict[str, Any]) -> None:
         row = [
@@ -264,13 +312,9 @@ class TickStorage:
             tick.get("cumulative_oi"),
             tick["raw_json"],
         ]
-        with self.raw_csv_path.open("a", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(row)
-        if self.duckdb_enabled:
-            conn = duckdb.connect(str(self.duckdb_path))
-            conn.execute("INSERT INTO live_ticks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
-            conn.close()
+        self._raw_writer.writerow(row)
+        if self._conn is not None:
+            self._raw_buffer.append(row)
 
     def _update_bucket(self, tick: dict[str, Any], meta: dict[str, Any]) -> None:
         start = bucket_start(tick["listed_at"], self.interval)
@@ -320,16 +364,9 @@ class TickStorage:
 
     def _flush_bucket(self, row: dict[str, Any]) -> None:
         out = [row.get(col) for col in CANONICAL_COLS]
-        with self.agg_csv_path.open("a", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(out)
-        if self.duckdb_enabled:
-            conn = duckdb.connect(str(self.duckdb_path))
-            conn.execute(
-                f"INSERT INTO live_1s VALUES ({', '.join(['?'] * len(CANONICAL_COLS))})",
-                out,
-            )
-            conn.close()
+        self._agg_writer.writerow(out)
+        if self._conn is not None:
+            self._agg_buffer.append(out)
 
 
 def login_client(login_mode: str):
@@ -383,7 +420,10 @@ def build_option_symbol(asset, expiry, strike, opt_type):
     return f"{asset}{exp}{strike_txt}{opt_type}"
 
 
-def on_option_chain_message(wrapper, storage, price_divisor=100.0):
+LAG_SAMPLES: list[float] = []  # receive - exchange seconds since the last status line
+
+
+def on_option_chain_message(wrapper, storage, price_divisor=100.0, wanted=None):
     """Handle one OptionChainWrapper update from the Nubra `option` stream.
 
     Receive time is clocked FIRST, before any parsing, so it reflects arrival
@@ -417,7 +457,11 @@ def on_option_chain_message(wrapper, storage, price_divisor=100.0):
             else:
                 strike_str = str(strike)
             expiry_str = None if expiry is None else str(expiry)
+            # The stream sends the whole chain; keep only the ATM-centred strikes we report.
+            if wanted is not None and (str(expiry_str)[:8], strike_str, opt_type) not in wanted:
+                continue
             listed = parse_epoch_to_ist(getattr(od, "timestamp", None))
+            LAG_SAMPLES.append((received - listed).total_seconds())
             meta = {
                 "symbol": build_option_symbol(asset, expiry, strike, opt_type),
                 "expiry": expiry_str,
@@ -460,6 +504,42 @@ def on_option_chain_message(wrapper, storage, price_divisor=100.0):
             storage.persist(tick, meta)
 
 
+def on_orderbook_message(wrapper, storage, price_divisor=100.0, meta_by_ref=None):
+    """Per-contract `orderbook` stream (what the AlphaBot portal uses in production):
+    ref_id, exchange timestamp, LTP, volume and depth, for options and futures alike."""
+    received = now_ist()
+    meta = (meta_by_ref or {}).get(getattr(wrapper, "ref_id", None))
+    if meta is None:
+        return
+    listed = parse_epoch_to_ist(getattr(wrapper, "timestamp", None))
+    LAG_SAMPLES.append((received - listed).total_seconds())
+
+    def price(v):
+        n = _num(v)
+        return None if n is None else n / price_divisor
+
+    bids = getattr(wrapper, "bids", None) or []
+    asks = getattr(wrapper, "asks", None) or []
+    tick = {
+        "listed_at": listed,
+        "received_at_IST": received.isoformat(),
+        "ref_id": getattr(wrapper, "ref_id", None),
+        "ltp": price(getattr(wrapper, "last_traded_price", None)),
+        "l1bid": price(bids[0].price) if bids else None,
+        "l1ask": price(asks[0].price) if asks else None,
+        "cumulative_volume": _num(getattr(wrapper, "volume", None)),
+        "cumulative_oi": None,
+        "raw_json": json.dumps({
+            "ref_id": getattr(wrapper, "ref_id", None), "timestamp": getattr(wrapper, "timestamp", None),
+            "ltp": getattr(wrapper, "last_traded_price", None), "ltq": getattr(wrapper, "last_traded_quantity", None),
+            "volume": getattr(wrapper, "volume", None),
+            "bid": [bids[0].price, bids[0].quantity] if bids else None,
+            "ask": [asks[0].price, asks[0].quantity] if asks else None,
+        }, default=str),
+    }
+    storage.persist(tick, meta)
+
+
 def parse_until(value: str) -> tuple[int, int]:
     hh, mm = str(value).split(":", 1)
     return int(hh), int(mm)
@@ -476,6 +556,9 @@ def main() -> int:
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent), help="output directory (defaults to this Nubra/ folder)")
     ap.add_argument("--cred-dir", default=None, help="folder holding .env + auth cache")
     ap.add_argument("--until", default="15:32", help="stop time in IST HH:MM")
+    ap.add_argument("--stream", default="orderbook", choices=["orderbook", "chain"],
+                    help="orderbook = per-contract ticks incl. futures and L1 (what the AlphaBot portal uses); "
+                         "chain = whole option-chain snapshots (no futures)")
     ap.add_argument("--dry-run", action="store_true", help="show resolved universe, then exit")
     ap.add_argument("--preflight", action="store_true", help="validate login + universe + ref_ids, then exit")
     ap.add_argument("--price-divisor", type=float, default=100.0, help="divide option LTP by this to get rupees (default 100; set 1 if already in rupees)")
@@ -495,11 +578,26 @@ def main() -> int:
     md = MarketData(nubra)
     contracts, atm, spot, step = discover_universe(md, args.expiries, args.strikes, args.fut_months)
     print(f"  spot~{spot}  ATM={atm}  step={step}", flush=True)
-    exps = sorted({c['expiry'] for c in contracts})
+    option_contracts = [c for c in contracts if c["instrument_type"] in ("CE", "PE")]
+    futures = [c for c in contracts if c["instrument_type"] == "FUT"]
+    # Futures used to be folded in here too, which subscribed three extra FULL option
+    # chains (one per futures month) and never captured a single future.
+    exps = sorted({c['expiry'] for c in option_contracts})
+    wanted = {(c["expiry"].strftime("%Y%m%d"), str(int(float(c["strike"]))), c["instrument_type"]) for c in option_contracts}
+    meta_by_ref: dict[int, dict[str, Any]] = {}
+    if args.stream == "orderbook":
+        for c in resolve_contract_refs(nubra, contracts):
+            strike = "" if c["instrument_type"] == "FUT" else str(int(float(c["strike"])))
+            meta_by_ref[c["ref_id"]] = {"symbol": c["symbol"], "expiry": c["expiry"].strftime("%Y%m%d"),
+                                        "strike": strike, "instrument_type": c["instrument_type"]}
     # Option-chain stream subscribes by ASSET:EXPIRY key, not per-contract ref_id.
     option_keys = [f"{UNDERLYING}:{e.strftime('%Y%m%d')}" for e in exps]
     print(f"  expiries: {[e.isoformat() for e in exps]}", flush=True)
-    print(f"  option-chain subscription keys: {option_keys}", flush=True)
+    if args.stream == "orderbook":
+        n_fut = sum(1 for m in meta_by_ref.values() if m["instrument_type"] == "FUT")
+        print(f"  stream=orderbook: {len(meta_by_ref)} ref_ids ({len(meta_by_ref) - n_fut} options, {n_fut} futures)", flush=True)
+    else:
+        print(f"  stream=chain: option-chain keys {option_keys} (keeping {len(wanted)} contracts; no futures on this stream)", flush=True)
 
     if args.dry_run or args.preflight:
         print(f"  would subscribe (data_type=option, exchange={EXCHANGE}): {option_keys}", flush=True)
@@ -530,7 +628,8 @@ def main() -> int:
 
     socket = websocketdata.NubraDataSocket(
         client=nubra,
-        on_option_data=lambda msg: on_option_chain_message(msg, storage, args.price_divisor),
+        on_option_data=lambda msg: on_option_chain_message(msg, storage, args.price_divisor, wanted),
+        on_orderbook_data=lambda msg: on_orderbook_message(msg, storage, args.price_divisor, meta_by_ref),
         on_connect=_on_connect,
         on_close=_on_close,
         on_error=_on_error,
@@ -549,16 +648,35 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown)
 
     socket.connect()
-    socket.subscribe(option_keys, data_type="option", exchange=EXCHANGE)
+    if args.stream == "orderbook":
+        socket.subscribe([str(r) for r in meta_by_ref], data_type="orderbook", exchange=EXCHANGE)
+    else:
+        socket.subscribe(option_keys, data_type="option", exchange=EXCHANGE)
 
     stop_h, stop_m = parse_until(args.until)
+    started = time.time()
+    chain_fallback = False
     try:
         while True:
             t = now_ist()
+            # Safety net: the orderbook stream only sends on change. If nothing has arrived
+            # 90 s into the session, add the option-chain stream so the day is not lost.
+            if (args.stream == "orderbook" and not chain_fallback and storage.tick_count == 0
+                    and time.time() - started > 90 and (t.hour, t.minute) >= (9, 15)):
+                print("  !! no orderbook ticks after 90 s - also subscribing the option-chain stream", flush=True)
+                socket.subscribe(option_keys, data_type="option", exchange=EXCHANGE)
+                chain_fallback = True
             if (t.hour, t.minute) >= (stop_h, stop_m):
                 print(f"\n  reached {args.until} IST - stopping.", flush=True)
                 break
             time.sleep(1)
+            if t.second == 0 and LAG_SAMPLES:
+                lags = sorted(LAG_SAMPLES)
+                LAG_SAMPLES.clear()
+                p50, p95 = lags[len(lags) // 2], lags[int(len(lags) * 0.95)]
+                flag = "  !! BACKLOG: collector is falling behind" if p50 > 5 else ""
+                print(f"  [{t.strftime('%H:%M:%S')}] ticks={storage.tick_count} last-min msgs={len(lags)} "
+                      f"recv-exch p50={p50:.2f}s p95={p95:.2f}s{flag}", flush=True)
     finally:
         if socket is not None:
             socket.close()

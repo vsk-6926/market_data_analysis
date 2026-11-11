@@ -38,9 +38,31 @@ Dhan/*.csv
 Dhan/*.duckdb
 NSE_FO.csv
 XTS/*.csv
+Arrow/*.csv
+Arrow/*.duckdb
+Arrow/arrow-instruments.csv
 alphabot*.csv
 *.parquet
 .debug/
 trae*
 *.md
 dhan_auth_probe.py
+
+# Quantick captures, reports, official EOD cache, vendor wheel
+Quantick/*.csv
+Quantick/*.duckdb
+Quantick/*.json
+Quantick/*.whl
+Quantick/bhavcopy_cache/
+Quantick/reports/
+
+# TBT captures and test output
+TBT/*.csv
+TBT/*.duckdb
+TBT/_test_out*/
+
+# Alphabots feed: token, refdata cache, captures
+Alphabots/feed.token
+Alphabots/refdata/
+Alphabots/*.csv
+Alphabots/*.duckdb

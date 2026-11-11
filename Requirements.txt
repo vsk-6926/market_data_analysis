@@ -14,3 +14,5 @@ fyers-apiv3          # import: fyers_apiv3
 dhanhq               # import: dhanhq
 nubra-sdk            # import: nubra_python_sdk   (install name != import name)
 pyarrow-client       # import: pyarrow_client     (NOT pyarrow)
+websocket-client     # Arrow SDK sockets
+zstandard            # Arrow HFT stream frames are zstd-compressed

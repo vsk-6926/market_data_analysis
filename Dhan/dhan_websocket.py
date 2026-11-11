@@ -828,6 +828,26 @@ def main() -> int:
     )
     print_universe(universe_info, meta_by_security)
 
+    if args.preflight:
+        # resolve_reference_price falls back to the security-master midpoint when
+        # the quote APIs reject us, so the universe resolving is NOT evidence the
+        # token works. Probe auth explicitly, and treat only an outright auth
+        # rejection as fatal so a transient API blip cannot skip Dhan.
+        try:
+            probe = dhan_client.get_fund_limits()
+        except Exception as exc:
+            print(f"  warning: could not verify Dhan auth ({exc}); continuing.", flush=True)
+            probe = None
+        if isinstance(probe, dict) and str(probe.get("status", "")).lower() == "failure":
+            remarks = probe.get("remarks") or {}
+            code = str(remarks.get("error_code") or "")
+            message = str(remarks.get("error_message") or remarks)
+            if code == "DH-901" or "authentication" in str(remarks.get("error_type", "")).lower():
+                raise RuntimeError(f"Dhan token rejected ({code}): {message}")
+            print(f"  warning: Dhan auth probe returned {code}: {message}", flush=True)
+        else:
+            print("  Dhan auth ok.", flush=True)
+
     if args.dry_run or args.preflight:
         return 0
 

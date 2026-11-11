@@ -94,18 +94,6 @@ def config():
     return {"defaults": _default_paths()}
 
 
-@app.post("/api/tools/snapshot-duckdb")
-def create_duckdb_snapshots(r: SnapshotReq):
-    items = {
-        "fyers_csv": _build_duckdb_snapshot(r.fyers_csv),
-        "dhan_csv": _build_duckdb_snapshot(r.dhan_csv),
-        "nubra_csv": _build_duckdb_snapshot(r.nubra_csv),
-        "xts_csv": _build_duckdb_snapshot(r.xts_csv),
-    }
-    created = {key: value["snapshot"] for key, value in items.items() if value and value.get("status") == "created" and value.get("snapshot")}
-    return {"ok": True, "snapshots": items, "created": created}
-
-
 class AnalyzeDirReq(BaseModel):
     date: str | None = None
     ref: str = "fyers"
@@ -131,6 +119,9 @@ class BrowseRowsReq(BaseModel):
     # nubra_parquet: str | None = None
     gdfl_parquet: str | None = None
     xts_csv: str | None = None
+    arrow_csv: str | None = None
+    arrow_hft_csv: str | None = None
+    quantick_csv: str | None = None
     symbol: str
     from_ts: str | None = None
     to_ts: str | None = None
@@ -154,6 +145,9 @@ class AlphaBotCompareReq(BaseModel):
     nubra_csv: str | None = None
     # nubra_parquet: str | None = None
     gdfl_parquet: str | None = None
+    arrow_csv: str | None = None
+    arrow_hft_csv: str | None = None
+    quantick_csv: str | None = None
     from_ts: str | None = None
     to_ts: str | None = None
     broker_filter: str | None = None
@@ -169,6 +163,9 @@ class DecisionCompareReq(BaseModel):
     # nubra_parquet: str | None = None
     gdfl_parquet: str | None = None
     xts_csv: str | None = None
+    arrow_csv: str | None = None
+    arrow_hft_csv: str | None = None
+    quantick_csv: str | None = None
     alpha_csv: str | None = None
     symbol: str = ""
     from_ts: str | None = None
@@ -184,6 +181,9 @@ class ReceiveCompareReq(BaseModel):
     nubra_csv: str | None = None
     # nubra_parquet: str | None = None
     xts_csv: str | None = None
+    arrow_csv: str | None = None
+    arrow_hft_csv: str | None = None
+    quantick_csv: str | None = None
     symbol: str
     from_ts: str | None = None
     to_ts: str | None = None
@@ -195,6 +195,9 @@ class ReceiveRowsReq(BaseModel):
     nubra_csv: str | None = None    
     # nubra_parquet: str | None = None
     xts_csv: str | None = None
+    arrow_csv: str | None = None
+    arrow_hft_csv: str | None = None
+    quantick_csv: str | None = None
     symbol: str
     from_ts: str | None = None
     to_ts: str | None = None
@@ -205,6 +208,9 @@ class PairedBrowseReq(BaseModel):
     fyers_csv: str | None = None
     dhan_csv: str | None = None
     nubra_csv: str | None = None
+    arrow_csv: str | None = None
+    arrow_hft_csv: str | None = None
+    quantick_csv: str | None = None
     left_broker: str = "fyers"
     right_broker: str = "nubra"
     symbol: str
@@ -218,6 +224,9 @@ class SnapshotReq(BaseModel):
     dhan_csv: str | None = None
     nubra_csv: str | None = None
     xts_csv: str | None = None
+    arrow_csv: str | None = None
+    arrow_hft_csv: str | None = None
+    quantick_csv: str | None = None
 
 
 class ExportColumn(BaseModel):
@@ -261,6 +270,9 @@ def _default_paths():
     # nubra_files = list((HERE / "Nubra").glob("*.parquet")) if (HERE / "Nubra").exists() else []
     gdfl_files = list((HERE / "GDFL").glob("*.parquet")) if (HERE / "GDFL").exists() else []
     xts_csv = _latest_glob("XTS", ["xts_live_1s_*.csv", "xts_live_ticks_*.csv"])
+    arrow_csv = _latest_glob("Arrow", ["arrow_live_1s_*.csv", "arrow_live_ticks_*.csv"])
+    arrow_hft_csv = _latest_glob("Arrow", ["arrow_hft_live_1s_*.csv", "arrow_hft_live_ticks_*.csv"])
+    quantick_csv = _latest_glob("Quantick", ["quantick_live_1s_*.csv", "quantick_live_ticks_*.csv"])
     dhan_files = [
         p for p in (HERE / "Dhan").glob("*.csv")
         if "api-scrip-master" not in p.name.lower()
@@ -279,6 +291,9 @@ def _default_paths():
         # "nubra_parquet": _latest(nubra_files),
         "gdfl_parquet": _latest(gdfl_files),
         "xts_csv": xts_csv,
+        "arrow_csv": arrow_csv,
+        "arrow_hft_csv": arrow_hft_csv,
+        "quantick_csv": quantick_csv,
         "dhan_csv": _latest(preferred_dhan or dhan_tick_files),
         "alphabot_csv": _latest(alpha_files),
         "symbol": "24400PE",
@@ -877,6 +892,11 @@ def _load_nubra_rows(path_str: str | None, query: str):
             df = pd.read_csv(path)
         except Exception:
             df = pd.read_parquet(path)
+    if df is None:
+        # _duckdb_project returns None on any failure - notably when a live
+        # collector holds the lock on the sidecar .duckdb. Fall back to the CSV
+        # so reports still work while a capture is running.
+        df = pd.read_csv(path) if suffix == ".csv" else pd.DataFrame()
     # #region debug-point B:nubra-loader-read
     _debug_event("B", "Server.py:_load_nubra_rows", "raw nubra frame loaded", {
         "rows": int(len(df)) if df is not None else -1,
@@ -908,8 +928,16 @@ def _load_nubra_rows(path_str: str | None, query: str):
     out["received_at_ist"] = _to_ist_series(received_col)
     out["receive_delay_ms"] = _delay_ms(out["received_at_ist"], out["listed_at_ist"])
     out["broker"] = "nubra"
-    nubra_ltp = pd.to_numeric(out.get("ltp"), errors="coerce").astype("float64")
-    nubra_close = pd.to_numeric(out.get("close"), errors="coerce").astype("float64")
+    # The 1s rollup CSV carries open/high/low/close but no ltp column; the duckdb
+    # path synthesises one as NULL, so guard both shapes and always end up with a
+    # Series rather than a scalar NaN.
+    def _numeric_col(name):
+        if name in out.columns:
+            return pd.to_numeric(out[name], errors="coerce").astype("float64")
+        return pd.Series(float("nan"), index=out.index, dtype="float64")
+
+    nubra_ltp = _numeric_col("ltp")
+    nubra_close = _numeric_col("close")
     out["ltp"] = nubra_ltp.fillna(nubra_close)
     out["o"] = pd.to_numeric(out.get("open"), errors="coerce")
     out["h"] = pd.to_numeric(out.get("high"), errors="coerce")
@@ -981,6 +1009,108 @@ def _load_xts_rows(path_str: str | None, query: str):
     out = out[["broker", "timestamp_ist", "listed_at_ist", "received_at_ist", "receive_delay_ms", "canonical_symbol", "native_symbol", "ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi", "message_type"]]
     metrics = ["ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi"]
     return out.dropna(subset=metrics, how="all")
+
+
+def _load_quantick_rows(path_str: str | None, query: str):
+    """Quantick/quantick_websocket.py writes Arrow's schema and canonical keys;
+    listed_at_ist is the last-traded time, like Arrow's ltt."""
+    return _load_arrow_rows(path_str, query, broker="quantick")
+
+
+def _load_arrow_hft_rows(path_str: str | None, query: str):
+    """Arrow's HFT stream writes the identical schema; only the label differs."""
+    out = _load_arrow_rows(path_str, query, broker="arrow_hft")
+    return out
+
+
+def _load_arrow_rows(path_str: str | None, query: str, broker: str = "arrow"):
+    path = _resolve_path(path_str)
+    if not path or not path.exists():
+        return pd.DataFrame()
+    headers = set(_csv_columns(path)) if path.suffix.lower() == ".csv" else (_duckdb_columns(path) if path.suffix.lower() == ".duckdb" else set())
+    df = None
+    if path.suffix.lower() in {".csv", ".duckdb"}:
+        native_col = "native_symbol" if "native_symbol" in headers else ("symbol" if "symbol" in headers else None)
+        timestamp_col = "datetime" if "datetime" in headers else None
+        if native_col and timestamp_col:
+            received_expr = (
+                _sql_ident("received_at_ist") if "received_at_ist" in headers else
+                _sql_ident("last_received_at_ist") if "last_received_at_ist" in headers else
+                _sql_ident("first_received_at_ist") if "first_received_at_ist" in headers else
+                "NULL"
+            )
+            listed_expr = _sql_ident("listed_at_ist") if "listed_at_ist" in headers else _sql_ident(timestamp_col)
+            df = _duckdb_project(
+                path,
+                [
+                    ("native_symbol", _sql_ident(native_col)),
+                    ("canonical_symbol", _sql_ident("canonical_symbol") if "canonical_symbol" in headers else "NULL"),
+                    ("datetime", _sql_ident(timestamp_col)),
+                    ("listed_at_ist", listed_expr),
+                    ("received_at_ist", received_expr),
+                    ("ltp", _sql_ident("ltp") if "ltp" in headers else "NULL"),
+                    ("open_price", _sql_ident("open_price") if "open_price" in headers else "NULL"),
+                    ("high_price", _sql_ident("high_price") if "high_price" in headers else "NULL"),
+                    ("low_price", _sql_ident("low_price") if "low_price" in headers else "NULL"),
+                    ("close_price", _sql_ident("close_price") if "close_price" in headers else "NULL"),
+                    ("ask_price", _sql_ident("ask_price") if "ask_price" in headers else "NULL"),
+                    ("bid_price", _sql_ident("bid_price") if "bid_price" in headers else "NULL"),
+                    ("volume", _sql_ident("volume") if "volume" in headers else "NULL"),
+                    ("open_interest", _sql_ident("open_interest") if "open_interest" in headers else "NULL"),
+                    ("message_type", _sql_ident("message_type") if "message_type" in headers else "NULL"),
+                ],
+                _symbol_filter_sql(query, [native_col, "canonical_symbol"], headers),
+            )
+    if df is None:
+        df = pd.read_csv(path)
+    if df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    native_col = "native_symbol" if "native_symbol" in out.columns else ("symbol" if "symbol" in out.columns else None)
+    if native_col is None or "datetime" not in out.columns:
+        return pd.DataFrame()
+    out["native_symbol"] = out[native_col].astype(str)
+    # The Arrow collector writes the same cross-broker canonical key the Dhan
+    # collector does, so no symbol reconstruction is needed here.
+    if "canonical_symbol" in out.columns:
+        out["canonical_symbol"] = out["canonical_symbol"].fillna(out["native_symbol"]).astype(str)
+    else:
+        out["canonical_symbol"] = out["native_symbol"]
+    out = out[_match_symbol(out["canonical_symbol"], query) | _match_symbol(out["native_symbol"], query)]
+    if out.empty:
+        return out
+    listed_col = out["listed_at_ist"] if "listed_at_ist" in out.columns else out["datetime"]
+    if "received_at_ist" in out.columns:
+        received_col = out["received_at_ist"]
+    elif "last_received_at_ist" in out.columns:
+        # The 1-second rollup stores first/last receive times; the row LTP and listed
+        # time both reflect the last tick in that bucket, so use the last one.
+        received_col = out["last_received_at_ist"]
+    elif "first_received_at_ist" in out.columns:
+        received_col = out["first_received_at_ist"]
+    else:
+        received_col = pd.Series([None] * len(out), index=out.index)
+    out["timestamp_ist"] = _to_ist_series(out["datetime"])
+    out["listed_at_ist"] = _to_ist_series(listed_col)
+    out["received_at_ist"] = _to_ist_series(received_col)
+    out["receive_delay_ms"] = _delay_ms(out["received_at_ist"], out["listed_at_ist"])
+    out["broker"] = broker
+    out["ltp"] = pd.to_numeric(out.get("ltp"), errors="coerce")
+    out["o"] = pd.to_numeric(out.get("open_price"), errors="coerce")
+    out["h"] = pd.to_numeric(out.get("high_price"), errors="coerce")
+    out["l"] = pd.to_numeric(out.get("low_price"), errors="coerce")
+    out["c"] = pd.to_numeric(out.get("close_price", out.get("ltp")), errors="coerce")
+    out["ask"] = pd.to_numeric(out.get("ask_price"), errors="coerce")
+    out["bid"] = pd.to_numeric(out.get("bid_price"), errors="coerce")
+    out["volume"] = pd.to_numeric(out.get("volume"), errors="coerce")
+    out["oi"] = pd.to_numeric(out.get("open_interest"), errors="coerce")
+    out["message_type"] = out.get("message_type")
+    out = out[["broker", "timestamp_ist", "listed_at_ist", "received_at_ist", "receive_delay_ms", "canonical_symbol", "native_symbol", "ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi", "message_type"]]
+    metrics = ["ltp", "o", "h", "l", "c", "ask", "bid", "volume", "oi"]
+    out = out.dropna(subset=metrics, how="all")
+    if "live_1s" in path.name.lower():
+        out = out.dropna(subset=["ltp"])
+    return out
 
 
 def _load_gdfl_rows(path_str: str | None, query: str):
@@ -1105,7 +1235,13 @@ def _nearest_market_match(trades: pd.DataFrame, market: pd.DataFrame, when_col: 
     left = trades[base_cols].dropna(subset=[when_col]).copy()
     left[when_col] = pd.to_datetime(left[when_col]).astype("datetime64[ns, Asia/Kolkata]")
     left = left.sort_values([when_col, "canonical_symbol", "trade_id"]).reset_index(drop=True)
-    right = market[["canonical_symbol", "timestamp_ist", "ltp"]].dropna(subset=["canonical_symbol", "timestamp_ist", "ltp"])
+    # A broker whose path was left blank arrives as a bare empty frame with no
+    # columns, so select only once the columns are known to be there.
+    needed = {"canonical_symbol", "timestamp_ist", "ltp"}
+    if market is None or market.empty or not needed.issubset(set(market.columns)):
+        right = pd.DataFrame(columns=["canonical_symbol", "timestamp_ist", "ltp"])
+    else:
+        right = market[["canonical_symbol", "timestamp_ist", "ltp"]].dropna(subset=["canonical_symbol", "timestamp_ist", "ltp"])
     if right.empty:
         out = left[["trade_id"]].copy()
         out[f"{broker}_{when_col}_time"] = pd.NaT
@@ -1355,7 +1491,7 @@ def _decision_metric_help(mode: str):
     }
 
 
-def _decision_input_warnings(reference: str, symbol: str | None, from_ts: str | None, to_ts: str | None, fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None, alpha_csv: str | None):
+def _decision_input_warnings(reference: str, symbol: str | None, from_ts: str | None, to_ts: str | None, fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None, alpha_csv: str | None, arrow_csv: str | None = None):
 # def _decision_input_warnings(reference: str, symbol: str | None, from_ts: str | None, to_ts: str | None, fyers_csv: str | None, nubra_parquet: str | None, gdfl_parquet: str | None, alpha_csv: str | None):
     warnings = []
     if from_ts and to_ts:
@@ -1367,7 +1503,7 @@ def _decision_input_warnings(reference: str, symbol: str | None, from_ts: str | 
                 "title": "Selected range is reversed",
                 "message": "The 'From' timestamp is later than the 'To' timestamp, so the comparison window is invalid.",
             })
-    date_tags = _extract_date_tags(fyers_csv, dhan_csv, nubra_csv, gdfl_parquet, alpha_csv, from_ts, to_ts)
+    date_tags = _extract_date_tags(fyers_csv, dhan_csv, nubra_csv, gdfl_parquet, alpha_csv, arrow_csv, from_ts, to_ts)
     # date_tags = _extract_date_tags(fyers_csv, nubra_parquet, gdfl_parquet, alpha_csv, from_ts, to_ts)
     if len(date_tags) > 1:
         warnings.append({
@@ -1375,7 +1511,7 @@ def _decision_input_warnings(reference: str, symbol: str | None, from_ts: str | 
             "title": "Inputs appear to span multiple dates",
             "message": f"Detected dates: {', '.join(date_tags)}. Cross-day file selection often creates misleading comparisons.",
         })
-    if reference in {"fyers", "dhan", "nubra", "gdfl"} and not str(symbol or "").strip():
+    if reference in {"fyers", "dhan", "nubra", "gdfl", "arrow", "arrow_hft", "quantick"} and not str(symbol or "").strip():
         warnings.append({
             "level": "medium",
             "title": "Symbol is empty",
@@ -1448,9 +1584,9 @@ def _broker_compare_warnings(compares: list[dict], sources: list[dict]):
 
 
 # def _alphabot_compare_warnings(candidates: list[dict], alpha_csv: str | None, fyers_csv: str | None, nubra_parquet: str | None, gdfl_parquet: str | None):
-def _alphabot_compare_warnings(candidates: list[dict], alpha_csv: str | None, fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None):
+def _alphabot_compare_warnings(candidates: list[dict], alpha_csv: str | None, fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None, arrow_csv: str | None = None):
     warnings = []
-    dates = _extract_date_tags(alpha_csv, fyers_csv, dhan_csv, nubra_csv, gdfl_parquet)
+    dates = _extract_date_tags(alpha_csv, fyers_csv, dhan_csv, nubra_csv, gdfl_parquet, arrow_csv)
     # dates = _extract_date_tags(alpha_csv, fyers_csv, nubra_parquet, gdfl_parquet)
     if len(dates) > 1:
         warnings.append({
@@ -1510,13 +1646,16 @@ def _alphabot_verdict(candidates: list[dict]):
 
 
 # def _build_broker_compare_frame(fyers_csv: str | None, nubra_parquet: str | None, gdfl_parquet: str | None, symbol: str, from_ts: str | None, to_ts: str | None):
-def _build_broker_compare_frame(fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None, symbol: str, from_ts: str | None, to_ts: str | None):
+def _build_broker_compare_frame(fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None, symbol: str, from_ts: str | None, to_ts: str | None, arrow_csv: str | None = None, arrow_hft_csv: str | None = None, quantick_csv: str | None = None):
     frames = [
         _load_fyers_rows(fyers_csv, symbol),
         _load_dhan_rows(dhan_csv, symbol),
         _load_nubra_rows(nubra_csv, symbol),
         # _load_nubra_rows(nubra_parquet, symbol),
         _load_gdfl_rows(gdfl_parquet, symbol),
+        _load_arrow_rows(arrow_csv, symbol),
+        _load_arrow_hft_rows(arrow_hft_csv, symbol),
+        _load_quantick_rows(quantick_csv, symbol),
     ]
     frames = [f for f in frames if f is not None and not f.empty]
     if not frames:
@@ -1525,12 +1664,12 @@ def _build_broker_compare_frame(fyers_csv: str | None, dhan_csv: str | None, nub
     df = _apply_range(df, from_ts, to_ts)
     if df.empty:
         return df
-    df = df[df["broker"].isin(["fyers", "dhan", "nubra", "gdfl"])].copy()
+    df = df[df["broker"].isin(["fyers", "dhan", "nubra", "gdfl", "arrow", "arrow_hft", "quantick"])].copy()
     df["sec"] = df["timestamp_ist"].dt.floor("1s")
     return df
 
 
-def _build_receive_compare_frame(fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, xts_csv: str | None, symbol: str, from_ts: str | None, to_ts: str | None):
+def _build_receive_compare_frame(fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, xts_csv: str | None, symbol: str, from_ts: str | None, to_ts: str | None, arrow_csv: str | None = None, arrow_hft_csv: str | None = None, quantick_csv: str | None = None):
 # def _build_receive_compare_frame(fyers_csv: str | None, nubra_parquet: str | None, xts_csv: str | None, symbol: str, from_ts: str | None, to_ts: str | None):
     frames = [
         _load_fyers_rows(fyers_csv, symbol),
@@ -1538,6 +1677,9 @@ def _build_receive_compare_frame(fyers_csv: str | None, dhan_csv: str | None, nu
         _load_nubra_rows(nubra_csv, symbol),
         # _load_nubra_rows(nubra_parquet, symbol),
         _load_xts_rows(xts_csv, symbol),
+        _load_arrow_rows(arrow_csv, symbol),
+        _load_arrow_hft_rows(arrow_hft_csv, symbol),
+        _load_quantick_rows(quantick_csv, symbol),
     ]
     frames = [f for f in frames if f is not None and not f.empty]
     if not frames:
@@ -1546,7 +1688,7 @@ def _build_receive_compare_frame(fyers_csv: str | None, dhan_csv: str | None, nu
     df = _apply_range(df, from_ts, to_ts)
     if df.empty:
         return df
-    df = df[df["broker"].isin(["fyers", "dhan", "nubra", "xts"])].copy()
+    df = df[df["broker"].isin(["fyers", "dhan", "nubra", "xts", "arrow", "arrow_hft", "quantick"])].copy()
     df["sec"] = df["timestamp_ist"].dt.floor("1s")
     return df
 
@@ -1591,7 +1733,8 @@ def _sample_symbols(broker, path_str, n=12):
     """Distinct canonical symbols present in a source file (no symbol filter),
     so the UI can tell the user what is actually available to search."""
     fn = {"fyers": _load_fyers_rows, "nubra": _load_nubra_rows, "xts": _load_xts_rows,
-          "gdfl": _load_gdfl_rows, "dhan": _load_dhan_rows}.get(broker)
+          "gdfl": _load_gdfl_rows, "dhan": _load_dhan_rows, "arrow": _load_arrow_rows,
+          "arrow_hft": _load_arrow_hft_rows, "quantick": _load_quantick_rows}.get(broker)
     if fn is None or not path_str:
         return []
     try:
@@ -1613,7 +1756,7 @@ def _source_report(broker, path_str, loaded):
 
 
 # def _receive_sources(fyers_csv, nubra_parquet, xts_csv, symbol):
-def _receive_sources(fyers_csv, dhan_csv, nubra_csv, xts_csv, symbol):
+def _receive_sources(fyers_csv, dhan_csv, nubra_csv, xts_csv, symbol, arrow_csv=None, arrow_hft_csv=None, quantick_csv=None):
     """Load the three receive-timing sources, returning (concat_df, per_source_reports).
 
     A blank or missing path is simply not loaded, so it cannot leak into the result.
@@ -1624,10 +1767,14 @@ def _receive_sources(fyers_csv, dhan_csv, nubra_csv, xts_csv, symbol):
         "nubra": _load_nubra_rows(nubra_csv, symbol),
         # "nubra": _load_nubra_rows(nubra_parquet, symbol),
         "xts": _load_xts_rows(xts_csv, symbol),
+        "arrow": _load_arrow_rows(arrow_csv, symbol),
+        "arrow_hft": _load_arrow_hft_rows(arrow_hft_csv, symbol),
+        "quantick": _load_quantick_rows(quantick_csv, symbol),
     }
-    paths = {"fyers": fyers_csv, "dhan": dhan_csv, "nubra": nubra_csv, "xts": xts_csv}
+    paths = {"fyers": fyers_csv, "dhan": dhan_csv, "nubra": nubra_csv, "xts": xts_csv,
+             "arrow": arrow_csv, "arrow_hft": arrow_hft_csv, "quantick": quantick_csv}
     # paths = {"fyers": fyers_csv, "nubra": nubra_parquet, "xts": xts_csv}
-    sources = [_source_report(b, paths[b], loaded[b]) for b in ("fyers", "dhan", "nubra", "xts")]
+    sources = [_source_report(b, paths[b], loaded[b]) for b in ("fyers", "dhan", "nubra", "xts", "arrow", "arrow_hft", "quantick")]
     frames = [f for f in loaded.values() if f is not None and not f.empty]
     if not frames:
         return pd.DataFrame(), sources
@@ -1713,6 +1860,9 @@ def _load_pair_source(broker: str, path_str: str | None, symbol: str):
         "fyers": _load_fyers_rows,
         "dhan": _load_dhan_rows,
         "nubra": _load_nubra_rows,
+        "arrow": _load_arrow_rows,
+        "arrow_hft": _load_arrow_hft_rows,
+        "quantick": _load_quantick_rows,
     }
     loader = loaders.get(broker_key)
     if loader is None:
@@ -1900,7 +2050,7 @@ def _generic_second_compare(df: pd.DataFrame, ref_broker: str, cmp_broker: str):
 
 
 # def _build_alphabot_match_frame(alpha_csv: str | None, fyers_csv: str | None, nubra_parquet: str | None, gdfl_parquet: str | None, from_ts: str | None, to_ts: str | None, broker_filter: str | None, tolerance_seconds: int):
-def _build_alphabot_match_frame(alpha_csv: str | None, fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None, from_ts: str | None, to_ts: str | None, broker_filter: str | None, tolerance_seconds: int):
+def _build_alphabot_match_frame(alpha_csv: str | None, fyers_csv: str | None, dhan_csv: str | None, nubra_csv: str | None, gdfl_parquet: str | None, from_ts: str | None, to_ts: str | None, broker_filter: str | None, tolerance_seconds: int, arrow_csv: str | None = None):
     trades = _load_alphabot_rows(alpha_csv, from_ts, to_ts, broker_filter)
     if trades.empty:
         return trades
@@ -1910,6 +2060,7 @@ def _build_alphabot_match_frame(alpha_csv: str | None, fyers_csv: str | None, dh
     nubra = _load_nubra_rows(nubra_csv, "").copy() if nubra_csv else pd.DataFrame()
     # nubra = _load_nubra_rows(nubra_parquet, "").copy() if nubra_parquet else pd.DataFrame()
     gdfl = _load_gdfl_rows(gdfl_parquet, "").copy() if gdfl_parquet else pd.DataFrame()
+    arrow = _load_arrow_rows(arrow_csv, "").copy() if arrow_csv else pd.DataFrame()
     if not fyers.empty:
         fyers = fyers[fyers["canonical_symbol"].isin(symbols)].copy()
     if not dhan.empty:
@@ -1918,13 +2069,15 @@ def _build_alphabot_match_frame(alpha_csv: str | None, fyers_csv: str | None, dh
         nubra = nubra[nubra["canonical_symbol"].isin(symbols)].copy()
     if not gdfl.empty:
         gdfl = gdfl[gdfl["canonical_symbol"].isin(symbols)].copy()
+    if not arrow.empty:
+        arrow = arrow[arrow["canonical_symbol"].isin(symbols)].copy()
 
     out = trades.copy()
-    for broker, frame in (("fyers", fyers), ("dhan", dhan), ("nubra", nubra), ("gdfl", gdfl)):
+    for broker, frame in (("fyers", fyers), ("dhan", dhan), ("nubra", nubra), ("gdfl", gdfl), ("arrow", arrow)):
         for when_col in ("entry_at", "exit_at"):
             match = _nearest_market_match(out, frame, when_col, broker, tolerance_seconds)
             out = out.merge(match, on="trade_id", how="left")
-    for broker in ("fyers", "dhan", "nubra", "gdfl"):
+    for broker in ("fyers", "dhan", "nubra", "gdfl", "arrow"):
         for side in ("entry", "exit"):
             price_col = f"{side}_price"
             ltp_col = f"{broker}_{side}_at_ltp"
@@ -2041,6 +2194,21 @@ def _xlsx_response(df: pd.DataFrame, filename: str, sheet_name: str = "data"):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
+
+
+@app.post("/api/tools/snapshot-duckdb")
+def create_duckdb_snapshots(r: SnapshotReq):
+    items = {
+        "fyers_csv": _build_duckdb_snapshot(r.fyers_csv),
+        "dhan_csv": _build_duckdb_snapshot(r.dhan_csv),
+        "nubra_csv": _build_duckdb_snapshot(r.nubra_csv),
+        "xts_csv": _build_duckdb_snapshot(r.xts_csv),
+        "arrow_csv": _build_duckdb_snapshot(r.arrow_csv),
+        "arrow_hft_csv": _build_duckdb_snapshot(r.arrow_hft_csv),
+        "quantick_csv": _build_duckdb_snapshot(r.quantick_csv),
+    }
+    created = {key: value["snapshot"] for key, value in items.items() if value and value.get("status") == "created" and value.get("snapshot")}
+    return {"ok": True, "snapshots": items, "created": created}
 
 
 @app.post("/api/analyze/captures")
@@ -2172,19 +2340,21 @@ def second_compare(r: SecondCompareReq):
 def alphabot_compare(r: AlphaBotCompareReq):
     if not r.alpha_csv:
         return {"ok": False, "error": "AlphaBot CSV is required"}
-    if not r.fyers_csv and not r.nubra_csv and not r.gdfl_parquet:
+    if not r.fyers_csv and not r.dhan_csv and not r.nubra_csv and not r.gdfl_parquet and not r.arrow_csv:
         return {"ok": False, "error": "at least one broker source is required"}
 
     out = _build_alphabot_match_frame(
-        r.alpha_csv,
-        r.fyers_csv,
-        r.nubra_csv,
-        # r.nubra_parquet,
-        r.gdfl_parquet,
-        r.from_ts,
-        r.to_ts,
-        r.broker_filter,
-        r.tolerance_seconds,
+        alpha_csv=r.alpha_csv,
+        fyers_csv=r.fyers_csv,
+        dhan_csv=r.dhan_csv,
+        nubra_csv=r.nubra_csv,
+        # nubra_parquet=r.nubra_parquet,
+        gdfl_parquet=r.gdfl_parquet,
+        from_ts=r.from_ts,
+        to_ts=r.to_ts,
+        broker_filter=r.broker_filter,
+        tolerance_seconds=r.tolerance_seconds,
+        arrow_csv=r.arrow_csv,
     )
     if out.empty:
         return {"ok": True, "summary": {}, "stats": [], "rows": [], "error": None}
@@ -2201,6 +2371,8 @@ def alphabot_compare(r: AlphaBotCompareReq):
         "nubra_exit_matches": int(out["nubra_exit_at_ltp"].notna().sum()) if "nubra_exit_at_ltp" in out else 0,
         "gdfl_entry_matches": int(out["gdfl_entry_at_ltp"].notna().sum()) if "gdfl_entry_at_ltp" in out else 0,
         "gdfl_exit_matches": int(out["gdfl_exit_at_ltp"].notna().sum()) if "gdfl_exit_at_ltp" in out else 0,
+        "arrow_entry_matches": int(out["arrow_entry_at_ltp"].notna().sum()) if "arrow_entry_at_ltp" in out else 0,
+        "arrow_exit_matches": int(out["arrow_exit_at_ltp"].notna().sum()) if "arrow_exit_at_ltp" in out else 0,
         "tolerance_seconds": int(r.tolerance_seconds),
     }
 
@@ -2208,6 +2380,7 @@ def alphabot_compare(r: AlphaBotCompareReq):
         *_alpha_stats(out, "fyers"),
         *_alpha_stats(out, "nubra"),
         *_alpha_stats(out, "gdfl"),
+        *_alpha_stats(out, "arrow"),
     ]
 
     table = out.sort_values("entry_at").copy()
@@ -2217,6 +2390,7 @@ def alphabot_compare(r: AlphaBotCompareReq):
         "fyers_entry_at_time", "fyers_exit_at_time",
         "nubra_entry_at_time", "nubra_exit_at_time",
         "gdfl_entry_at_time", "gdfl_exit_at_time",
+        "arrow_entry_at_time", "arrow_exit_at_time",
     ]:
         if col in table.columns:
             table[col] = table[col].map(_fmt_scalar_ts)
@@ -2234,7 +2408,7 @@ def alphabot_compare(r: AlphaBotCompareReq):
 
 @app.post("/api/report/receive-compare")
 def receive_compare(r: ReceiveCompareReq):
-    df = _build_receive_compare_frame(r.fyers_csv, r.dhan_csv, r.nubra_csv, r.xts_csv, r.symbol, r.from_ts, r.to_ts)
+    df = _build_receive_compare_frame(r.fyers_csv, r.dhan_csv, r.nubra_csv, r.xts_csv, r.symbol, r.from_ts, r.to_ts, arrow_csv=r.arrow_csv, arrow_hft_csv=r.arrow_hft_csv, quantick_csv=r.quantick_csv)
     # df = _build_receive_compare_frame(r.fyers_csv, r.nubra_parquet, r.xts_csv, r.symbol, r.from_ts, r.to_ts)
     if df.empty:
         return {
@@ -2247,7 +2421,7 @@ def receive_compare(r: ReceiveCompareReq):
         }
 
     brokers = []
-    for broker in ("fyers", "dhan", "nubra", "xts"):
+    for broker in ("fyers", "dhan", "nubra", "xts", "arrow", "arrow_hft", "quantick"):
         summary = _receive_delay_summary(df, broker)
         if summary is not None:
             brokers.append(summary)
@@ -2286,7 +2460,7 @@ def receive_rows(r: ReceiveRowsReq):
     """Dedicated timing view: for each instrument, the exchange (listed) timestamp,
     the local receive timestamp, and the gap between them. Blank/missing sources
     are reported explicitly so it is obvious which feeds were actually used."""
-    df, sources = _receive_sources(r.fyers_csv, r.dhan_csv, r.nubra_csv, r.xts_csv, r.symbol)
+    df, sources = _receive_sources(r.fyers_csv, r.dhan_csv, r.nubra_csv, r.xts_csv, r.symbol, arrow_csv=r.arrow_csv, arrow_hft_csv=r.arrow_hft_csv, quantick_csv=r.quantick_csv)
     # df, sources = _receive_sources(r.fyers_csv, r.nubra_parquet, r.xts_csv, r.symbol)
     if not df.empty:
         df = _apply_range(df, r.from_ts, r.to_ts)
@@ -2294,7 +2468,7 @@ def receive_rows(r: ReceiveRowsReq):
         return {"ok": True, "overview": {}, "summary": [], "rows": [], "sources": sources, "error": None}
     df = df.copy()
     df["sec"] = df["timestamp_ist"].dt.floor("1s")
-    summary = [s for s in (_receive_delay_summary(df, b) for b in ("fyers", "dhan", "nubra", "xts")) if s is not None]
+    summary = [s for s in (_receive_delay_summary(df, b) for b in ("fyers", "dhan", "nubra", "xts", "arrow", "arrow_hft", "quantick")) if s is not None]
     rows = _receive_detail_rows(df, r.limit)
     overview = {
         "symbol": r.symbol,
@@ -2311,8 +2485,9 @@ def receive_rows(r: ReceiveRowsReq):
 def browse_paired(r: PairedBrowseReq):
     left_broker = str(r.left_broker or "").strip().lower()
     right_broker = str(r.right_broker or "").strip().lower()
-    if left_broker not in {"fyers", "dhan", "nubra"} or right_broker not in {"fyers", "dhan", "nubra"}:
-        return {"ok": False, "error": "paired compare brokers must be chosen from: fyers, dhan, nubra"}
+    valid_pair = {"fyers", "dhan", "nubra", "arrow", "arrow_hft", "quantick"}
+    if left_broker not in valid_pair or right_broker not in valid_pair:
+        return {"ok": False, "error": "paired compare brokers must be chosen from: fyers, dhan, nubra, arrow, arrow_hft, quantick"}
     if left_broker == right_broker:
         return {"ok": False, "error": "paired compare needs two different brokers"}
 
@@ -2320,6 +2495,9 @@ def browse_paired(r: PairedBrowseReq):
         "fyers": r.fyers_csv,
         "dhan": r.dhan_csv,
         "nubra": r.nubra_csv,
+        "arrow": r.arrow_csv,
+        "arrow_hft": r.arrow_hft_csv,
+        "quantick": r.quantick_csv,
     }
     paired, sources = _paired_compare_rows(
         left_broker,
@@ -2373,13 +2551,13 @@ def browse_paired(r: PairedBrowseReq):
 @app.post("/api/report/decision")
 def decision_compare(r: DecisionCompareReq):
     ref = str(r.reference or "").strip().lower()
-    if ref not in {"fyers", "dhan", "nubra", "gdfl", "alphabot"}:
-        return {"ok": False, "error": "reference must be one of: fyers, dhan, nubra, gdfl, alphabot"}
+    if ref not in {"fyers", "dhan", "nubra", "gdfl", "arrow", "arrow_hft", "quantick", "alphabot"}:
+        return {"ok": False, "error": "reference must be one of: fyers, dhan, nubra, gdfl, arrow, arrow_hft, quantick, alphabot"}
     # input_warnings = _decision_input_warnings(ref, r.symbol, r.from_ts, r.to_ts, r.fyers_csv, r.nubra_parquet, r.gdfl_parquet, r.alpha_csv)
-    input_warnings = _decision_input_warnings(ref, r.symbol, r.from_ts, r.to_ts, r.fyers_csv, r.dhan_csv, r.nubra_csv, r.gdfl_parquet, r.alpha_csv)
+    input_warnings = _decision_input_warnings(ref, r.symbol, r.from_ts, r.to_ts, r.fyers_csv, r.dhan_csv, r.nubra_csv, r.gdfl_parquet, r.alpha_csv, arrow_csv=r.arrow_csv)
 
-    if ref in {"fyers", "dhan", "nubra", "gdfl"}:
-        df = _build_broker_compare_frame(r.fyers_csv, r.dhan_csv, r.nubra_csv, r.gdfl_parquet, r.symbol, r.from_ts, r.to_ts)
+    if ref in {"fyers", "dhan", "nubra", "gdfl", "arrow", "arrow_hft", "quantick"}:
+        df = _build_broker_compare_frame(r.fyers_csv, r.dhan_csv, r.nubra_csv, r.gdfl_parquet, r.symbol, r.from_ts, r.to_ts, arrow_csv=r.arrow_csv, arrow_hft_csv=r.arrow_hft_csv, quantick_csv=r.quantick_csv)
         # df = _build_broker_compare_frame(r.fyers_csv, r.nubra_parquet, r.gdfl_parquet, r.symbol, r.from_ts, r.to_ts)
         sources = [
             _source_stats_from_df(df, "fyers", r.fyers_csv),
@@ -2387,6 +2565,9 @@ def decision_compare(r: DecisionCompareReq):
             # _source_stats_from_df(df, "nubra", r.nubra_parquet),
             _source_stats_from_df(df, "nubra", r.nubra_csv),
             _source_stats_from_df(df, "gdfl", r.gdfl_parquet),
+            _source_stats_from_df(df, "arrow", r.arrow_csv),
+            _source_stats_from_df(df, "arrow_hft", r.arrow_hft_csv),
+            _source_stats_from_df(df, "quantick", r.quantick_csv),
         ]
         methodology = _decision_metric_help("broker")
         if df.empty:
@@ -2509,6 +2690,7 @@ def decision_compare(r: DecisionCompareReq):
         r.to_ts,
         r.alphabot_broker,
         r.tolerance_seconds,
+        arrow_csv=r.arrow_csv,
     )
     methodology = _decision_metric_help("alphabot")
     sources = [
@@ -2588,7 +2770,7 @@ def decision_compare(r: DecisionCompareReq):
         }
 
     candidates = []
-    for broker in ("fyers", "dhan", "nubra", "gdfl"):
+    for broker in ("fyers", "dhan", "nubra", "gdfl", "arrow"):
         if f"{broker}_entry_diff" in out.columns:
             candidates.append(_alphabot_candidate_summary(out, broker))
     candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
@@ -2640,7 +2822,7 @@ def decision_compare(r: DecisionCompareReq):
         if col in detail.columns:
             detail[col] = detail[col].map(_fmt_scalar_ts)
     detail = detail.astype(object).where(pd.notnull(detail), None)
-    warnings = input_warnings + _alphabot_compare_warnings(candidates, r.alpha_csv, r.fyers_csv, r.dhan_csv, r.nubra_csv, r.gdfl_parquet)
+    warnings = input_warnings + _alphabot_compare_warnings(candidates, r.alpha_csv, r.fyers_csv, r.dhan_csv, r.nubra_csv, r.gdfl_parquet, arrow_csv=r.arrow_csv)
     # warnings = input_warnings + _alphabot_compare_warnings(candidates, r.alpha_csv, r.fyers_csv, r.nubra_parquet, r.gdfl_parquet)
     return {
         "ok": True,
@@ -2674,14 +2856,18 @@ def browse_rows(r: BrowseRowsReq):
         # "nubra": _load_nubra_rows(r.nubra_parquet, r.symbol),
         "gdfl": _load_gdfl_rows(r.gdfl_parquet, r.symbol),
         "xts": _load_xts_rows(r.xts_csv, r.symbol),
+        "arrow": _load_arrow_rows(r.arrow_csv, r.symbol),
+        "arrow_hft": _load_arrow_hft_rows(r.arrow_hft_csv, r.symbol),
+        "quantick": _load_quantick_rows(r.quantick_csv, r.symbol),
     }
     paths = {"fyers": r.fyers_csv, "dhan": r.dhan_csv, "nubra": r.nubra_csv,
-             "gdfl": r.gdfl_parquet, "xts": r.xts_csv}
+             "gdfl": r.gdfl_parquet, "xts": r.xts_csv, "arrow": r.arrow_csv,
+             "arrow_hft": r.arrow_hft_csv, "quantick": r.quantick_csv}
     # paths = {"fyers": r.fyers_csv, "dhan": r.dhan_csv, "nubra": r.nubra_parquet,
     #          "gdfl": r.gdfl_parquet, "xts": r.xts_csv}
     # A blank or missing path is never loaded, so it cannot influence the result.
     sources = [_source_report(b, paths[b], loaded[b])
-               for b in ("fyers", "dhan", "nubra", "gdfl", "xts") if paths[b]]
+               for b in ("fyers", "dhan", "nubra", "gdfl", "xts", "arrow", "arrow_hft", "quantick") if paths[b]]
     frames = [f for f in loaded.values() if f is not None and not f.empty]
     if not frames:
         return {"ok": True, "rows": [], "count": 0, "brokers": {}, "sources": sources}
