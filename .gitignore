@@ -69,3 +69,7 @@ Alphabots/*.duckdb
 
 # Raw Dhan expired-options pull (shared as datasets/ split zip instead)
 Dhan/expired_data/
+
+# Fyers expired-options pull + merged Sudhir data (shared as datasets/ split zips)
+FYERS/expired_data/
+Dhan/expired_data_merged/
